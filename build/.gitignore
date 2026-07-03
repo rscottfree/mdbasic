@@ -1,0 +1,3 @@
+# build_disk.sh output — ignore all artifacts, keep the directory tracked.
+*
+!.gitignore
