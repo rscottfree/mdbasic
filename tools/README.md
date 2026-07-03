@@ -70,6 +70,42 @@ a sampling boundary, while speed 1 takes about 12 jiffies and speed 2 takes
 about 22 jiffies. The same result under `$D030=$FF` turbo confirms the delay is
 jiffy-clock based.
 
+## Aseprite to Sprite Conversion
+
+`tools/aseprite_to_spr.py` converts an Aseprite animation into MDBASIC `.spr`
+sprite-data file(s). It parses the `.aseprite` file directly (Python 3 standard
+library only — no Pillow or Aseprite CLI), so there is no need to export a PNG
+first.
+
+```sh
+# One sprite per frame, scaled to fit 24x21, loading at index 128 ($2000):
+tools/aseprite_to_spr.py run.aseprite run.spr
+
+# Full-resolution 2x2 tiling (four files) into clean upper RAM (bank 3):
+tools/aseprite_to_spr.py run.aseprite run.spr --split 2x2 --index 16 --bank 3
+
+# Multicolor, previewing each sprite as ASCII art on stderr:
+tools/aseprite_to_spr.py run.aseprite run.spr --multicolor --preview
+```
+
+A `.spr` is a PRG-style binary — a 2-byte load address followed by 64-byte
+sprite blocks — so it loads with `LOAD"RUN.SPR",8,1` and animates with
+`PLAY SPRITE`. Highlights:
+
+- **Colour modes** — hires silhouettes (default) or `--multicolor` (up to three
+  auto-picked C64 colours, reported as `SPRITE`/`SPRCOL` values).
+- **Splitting** — `--split CxR` tiles artwork larger than one 24x21 sprite
+  across a grid at native resolution, positioning the window over all frames to
+  avoid clipping and reporting any pixels that must be clipped.
+- **Addressing** — target a location with an absolute `--load-addr` or a
+  bank-relative `--index N [--bank B]` (`address = index*64 + bank*16384`); the
+  data index printed for each file is the value to use with `SPRITE`/
+  `PLAY SPRITE`.
+- **Layers** — `--skip-layers` (default `BG`) drops backdrop layers so only the
+  character is rasterized.
+
+Run `tools/aseprite_to_spr.py --help` for the full option list.
+
 ## Building release artifacts
 
 `tools/build_disk.sh [outdir]` assembles `mdbasic.asm` and writes all four
