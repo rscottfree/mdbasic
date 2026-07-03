@@ -395,7 +395,7 @@ TOKEN_PI      = $ff  ;PI symbol token
 .text "CBM80"
 ;
 mesge
-.text "mdbasic 26.06.17"
+.text "mdbasic 26.07.04"
 .byte 13,0
 ;
 ;Text for New Commands
@@ -2824,7 +2824,9 @@ moveto
  bne nosped    ;no move speed specified?
  jsr getvalg   ;get the speed param 0-255
  sta $fe       ;temp storage for move speed
-nosped lda #1  ;0=draw line, 1=move sprite
+nosped ldx #0
+ stx $22       ;init speed accumulator
+ inx           ;0=draw line, 1=move sprite
  jmp strtln    ;calculate line and move sprite along that line at given speed
 ;
 spriteon
@@ -3464,7 +3466,7 @@ liner
  jsr getxy
  jsr point2
  jsr types
- lda #0          ;0=draw line, 1=move sprite move
+ ldx #0          ;0=draw line, 1=move sprite move
  jsr strtln
  jmp savepoint   ;save last plotted point
 ;
@@ -3481,7 +3483,7 @@ savepoint
 ;
 ;draw line or move sprite on line
 strtln
- sta XSAV  ;0=draw line, 1=move sprite move
+ stx XSAV  ;0=draw line, 1=move sprite move
  dec R6510
  jsr linedraw
  inc R6510
@@ -4359,11 +4361,12 @@ pfgnd lda $a2
  beq endplay
  jsr playit
  bcc pfgnd
+plydone
  rts
 ;
 ; IRQ routine to play next note
 playit
- clc ;reset done flag
+ clc            ;reset done flag
  dec playtime
  bpl plydone
  lda R6510
@@ -4378,9 +4381,7 @@ playit
 played sec      ;flag for done playing
  pla
  sta R6510
- bcs endplay
-plydone
- rts
+ bcc plydone
 endplay
  ldx playvoice  ;SID reg offset
  lda playwave   ;select current waveform; start release cycle
@@ -5994,20 +5995,17 @@ std010 sta MSIGX
  lda $fd
  sta SP0Y,y
 ;apply sprite move delay
- ldy $fe      ;move speed
- beq linedon
-movewait
- jsr STOP
- bne movwait  ;carry flag returned to caller to indicate STOP key pressed
+ lda $fe        ;sprite move speed
+ clc
+ adc $22        ;accumulate speed for velocity control
+ sta $22        ;to determine if a jiffy wait is needed
+ bcc linedon    ;when speed accumulation overflows
+ ldx #1         ;wait one jiffy
+ ldy #0
+ jsr delay2     ;jiffy wait; returns with carry set if STOP key pressed
+ bcc linedon    ;STOP key not pressed so continue moving the sprite
+ pla            ;STOP key pressed so prevent returning back to the move loop
  pla
- pla
- rts
-movwait
- ldx #7
-mowait dex
- bne mowait
- dey
- bne movewait
 linedon rts
 ;
 ;**************************
