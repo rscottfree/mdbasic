@@ -113,8 +113,6 @@ entry
  sta savbg
  lda COLOR
  sta savfg
- lda VMCSB
- sta savvmc
  lda U64SPEED        ;Ultimate 64: save the current turbo speed bits, then run flat
  sta savturbo        ;out (harmless on stock C64/VICE - $d031 reads $ff, drops writes)
  ora #$0f            ;speed index 15 = max turbo (48/64 MHz); badline bit 7 preserved
@@ -433,8 +431,20 @@ exit
  sta BGCOL0
  lda savfg
  sta COLOR
- lda savvmc
+ ;force canonical text mode / VIC bank 0 (identical to SCREEN 0's pgzero in
+ ;mdbasic.asm) so docs never exit in a half-restored graphics state: VMCSB is
+ ;not put back to the program's value, and the bank/mode/screen pointers are
+ ;re-asserted rather than trusted to still hold forcetext's entry values. A
+ ;graphics program simply re-RUNs (its SCREEN reprograms all of this).
+ lda CI2PRA
+ ora #%00000011     ;VIC 16K bank 0 ($0000-$3fff)
+ sta CI2PRA
+ lda #%00011011     ;bitmap/ext-color off, 25 rows, display on
+ sta SCROLY
+ lda #%00010101     ;video matrix $0400 + uppercase ROM charset ($1000)
  sta VMCSB
+ lda #$04
+ sta HIBASE         ;kernal prints to $0400
  lda savturbo
  sta U64SPEED        ;restore the Ultimate 64 turbo speed bits
  lda sav01
@@ -1396,7 +1406,6 @@ savkey   .word 0      ;saved KEYLOG vector (MDBASIC's keychk)
 savbdr   .byte 0      ;saved border color
 savbg    .byte 0      ;saved background color
 savfg    .byte 0      ;saved foreground color
-savvmc   .byte 0      ;saved VMCSB (charset + video matrix)
 savturbo .byte 0      ;saved Ultimate 64 turbo speed register ($d031)
 savd3    .byte 0      ;saved cursor column (PNTR $d3)
 savd6    .byte 0      ;saved cursor row (TBLX $d6)
