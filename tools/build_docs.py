@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Build the MDBASIC docs-pager data from mdbasic.pdf.
+"""Build the MDBASIC docs-pager data from the markdown manual (docs/manual/*.md).
 
-Pipeline: pdftotext -> split the User Reference Guide into per-command sections
--> strip running headers/footers -> reflow to 40 columns -> convert to screen
-codes -> pack into Magic Desk doc banks (an index bank + a fixed-40-byte line
-stream, 204 lines per 8 KB bank). An index keyed by the tokenized keyword byte
-maps HELP <topic> to a starting line.
+Source of truth is one markdown file per topic under docs/manual/. This tool
+renders them to 40-column screen-code line records and packs them into Magic Desk
+doc banks exactly as before, so make_crt.py / build_disk.sh / docs_pager.asm are
+untouched. (The one-time PDF -> markdown scaffolder lives in bootstrap_manual.py.)
 
     tools/build_docs.py --list
-    tools/build_docs.py --preview SPRITE CIRCLE
-    tools/build_docs.py --pack build/docs.bin   # writes the doc-bank image
+    tools/build_docs.py --preview SCREEN COLOR
+    tools/build_docs.py --pack build/docs.bin   # writes .idx + .dat
+
+Markdown body grammar the renderer understands:
+  * blank line               -> blank record
+  * ```fence``` block        -> verbatim (wrapped only if a line exceeds 40 cols)
+  * GFM table (| a | b | + |---|)  -> table engine (box grid / cards / sections)
+  * <!-- table: mode=... -->       -> directive selecting a wide-table layout
+  * <!-- ... -->             -> comment, dropped (may span lines)
+  * any other line           -> passthrough, word-wrapped only if it exceeds 40 cols
 
 The packed image is a raw concatenation of 8 KB doc banks (no CRT/CHIP headers);
 make_crt.py appends them after the three image banks. See docs-pager design.
@@ -19,13 +26,12 @@ from __future__ import annotations
 import argparse
 import re
 import struct
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PDF = ROOT / "mdbasic.pdf"
 ASM = ROOT / "mdbasic.asm"
+MANUAL = ROOT / "docs" / "manual"
 COLS = 40
 LINES_PER_BANK = 204            # 204*40 = 8160 <= 8192
 BANK_SIZE = 0x2000
@@ -35,17 +41,6 @@ NUM_IMAGE_BANKS = 3             # banks 0-2 hold the 16 KB MDBASIC image
 INDEX_BANK = NUM_IMAGE_BANKS    # bank 3 = pager code + index
 DATA_BANK0 = NUM_IMAGE_BANKS + 1  # banks 4+ = line stream
 
-FOOTER_RE = re.compile(r"^\s*MDBASIC(\s+\d+)?\s*$")
-# Page-break artifacts inside the appendices: a bare "APPENDIX F" header repeated
-# at the top of each spilled page, or "Appendix G (continued)". Dropped like the
-# running footer so they don't litter the reflowed body.
-CONTINUED_RE = re.compile(r"^APPENDIX [A-H](\s+\(continued\))?\s*$", re.I)
-# A topic header is a short flush-left line immediately followed (within a few
-# lines) by PURPOSE: — that anchor is unique to the top of each command block.
-# Headers vary: "SPRITE", "HEX$()", "KEY (statement)", "ON ERR", "ON KEY".
-ANCHOR = "PURPOSE:"
-MAX_HEADER = 30
-
 # Stock CBM BASIC tokens for the commands MDBASIC documents but does not redefine
 # in newcmd. Names are matched after stripping $ and () from the header.
 STOCK_TOKENS = {
@@ -54,13 +49,29 @@ STOCK_TOKENS = {
     "WAIT": 0x92,
 }
 
+# PETSCII box-drawing glyphs -> C64 screen codes (lowercase charset). Verified in
+# VICE by tools/glyph_check.py; the pager embeds these directly, no code change.
+BOX_SCREEN = {
+    "│": 0x5D,  # |  vertical
+    "─": 0x40,  # -  horizontal
+    "┌": 0x70,  # ,- top-left
+    "┐": 0x6E,  # -. top-right
+    "└": 0x6D,  # '- bottom-left
+    "┘": 0x7D,  # -' bottom-right
+    "├": 0x6B,  # |- left tee
+    "┤": 0x73,  # -| right tee
+    "┬": 0x72,  # T  top tee
+    "┴": 0x71,  # bottom tee
+    "┼": 0x5B,  # +  cross
+}
+V, H = "│", "─"
+TL, TR, BL, BR = "┌", "┐", "└", "┘"
+LT, RT, TT, BT, XX = "├", "┤", "┬", "┴", "┼"
 
-def pdf_text() -> list[str]:
-    out = subprocess.run(["pdftotext", "-layout", str(PDF), "-"],
-                         check=True, capture_output=True, text=True).stdout
-    return out.splitlines()
 
-
+# --------------------------------------------------------------------------- #
+# Token resolution (unchanged: parse newcmd from the assembly source)
+# --------------------------------------------------------------------------- #
 def mdbasic_tokens() -> dict[str, int]:
     """Parse newcmd from mdbasic.asm: .shift entries from $CB upward."""
     tok = 0xCB
@@ -84,13 +95,10 @@ def mdbasic_tokens() -> dict[str, int]:
 
 def topic_token(name: str, mdtok: dict[str, int]) -> int | None:
     """Resolve a header like 'KEY (statement)' or 'ON ERR' to a keyword token."""
-    # Words in the header, keeping a trailing $ (HEX$) but dropping () and punct.
     words = re.findall(r"[A-Z][A-Z0-9]*\$?", name.upper())
-    # Prefer the first word that names a keyword; for 'ON ERR'/'ON KEY' the
-    # leading ON is itself a token, so skip it when a later word also resolves.
     cands = words[1:] + words if words and words[0] == "ON" else words
     for w in cands:
-        for cand in (w, w.rstrip("$")):     # TRIM$ folds to the TRIM token
+        for cand in (w, w.rstrip("$")):
             if cand in mdtok:
                 return mdtok[cand]
             if cand in STOCK_TOKENS:
@@ -98,65 +106,79 @@ def topic_token(name: str, mdtok: dict[str, int]) -> int | None:
     return None
 
 
-def guide_bounds(lines: list[str]) -> tuple[int, int]:
-    start = 0
-    for i, ln in enumerate(lines):
-        if "USER REFERENCE GUIDE" in ln.upper():
-            start = i
-    end = len(lines)
-    for i in range(start, len(lines)):
-        if re.match(r"^APPENDIX\b", lines[i].strip()):
-            end = i
-            break
-    return start, end
+# --------------------------------------------------------------------------- #
+# Screen-code conversion
+# --------------------------------------------------------------------------- #
+def ascii_to_screen(c: str) -> int:
+    """ASCII (or PETSCII box glyph) -> C64 screen code (lowercase charset)."""
+    if c in BOX_SCREEN:
+        return BOX_SCREEN[c]
+    o = ord(c)
+    if 0x20 <= o <= 0x3F:
+        return o
+    if o == 0x40:
+        return 0x00
+    if 0x41 <= o <= 0x5A:
+        return o                 # uppercase A-Z -> screen codes $41-$5A
+    if 0x5B <= o <= 0x5F:
+        return o - 0x40
+    if o == 0x7C:                # | -> box vertical bar (renders as a pipe in the
+        return 0x5D              #    lowercase charset; screen code $42 shows as "B")
+    if 0x61 <= o <= 0x7A:        # lowercase a-z -> screen codes $01-$1A
+        return o - 0x60
+    return 0x20                  # anything else -> space
 
 
-def find_sections(lines: list[str]) -> list[tuple[str, int, int]]:
-    start, end = guide_bounds(lines)
-    heads: list[tuple[str, int]] = []
-    for i in range(start, end):
-        t = lines[i]
-        if t.lstrip() != t:             # must be flush-left
-            continue
-        name = t.strip()
-        if not name or FOOTER_RE.match(t) or len(name) > MAX_HEADER:
-            continue
-        if name.endswith(":"):          # PURPOSE:/SYNTAX:/DESCRIPTION: etc.
-            continue
-        # PURPOSE: appears once, right below the header of each command block.
-        look = "\n".join(lines[i + 1:i + 6]).upper()
-        if ANCHOR not in look:
-            continue
-        if not heads or i - heads[-1][1] > 8:
-            heads.append((name, i))
-    return [(n, idx, heads[j + 1][1] if j + 1 < len(heads) else end)
-            for j, (n, idx) in enumerate(heads)]
+def line_to_record(text: str) -> bytes:
+    text = text[:COLS]
+    rec = bytes(ascii_to_screen(c) for c in text)
+    return rec + b"\x20" * (COLS - len(rec))
 
 
-def clean(lines: list[str]) -> list[str]:
-    out = [ln.replace('{', '(').replace('}', ')').replace('©', '(c)').rstrip()
-           for ln in lines if not FOOTER_RE.match(ln) and not CONTINUED_RE.match(ln)]
-    res, blank = [], 0
-    for ln in out:
-        if not ln.strip():
-            blank += 1
-            if blank > 1:
-                continue
-        else:
-            blank = 0
-        res.append(ln)
-    while res and not res[0].strip():
-        res.pop(0)
-    while res and not res[-1].strip():
-        res.pop()
-    return res
+RVS_SPACE = 0x20 | 0x80         # reverse-video space, fills a banner row
 
 
-def wrap_words(words: list[str]) -> list[str]:
+def rvs_record(text: str) -> bytes:
+    """A full-width reverse-video record (used for card sub-banners)."""
+    t = (" " + text)[:COLS]
+    rec = bytes(ascii_to_screen(c) | 0x80 for c in t)
+    return rec + bytes([RVS_SPACE]) * (COLS - len(rec))
+
+
+def to_record(item: str | bytes) -> bytes:
+    """A rendered body item is either display text or a pre-built record (bytes)."""
+    if isinstance(item, bytes):
+        return (item + b"\x20" * COLS)[:COLS]
+    return line_to_record(item)
+
+
+def display_name(name: str) -> str:
+    """Produce a NAMELEN-char uppercase display name, space-padded."""
+    n = name.upper().strip()
+    n = n.replace("(STATEMENT)", "(STMT)")
+    n = n.replace("(VARIABLES)", "(VARS)")
+    n = n.replace("(VARIABLE)", "(VAR)")
+    n = re.sub(r"\s+AND\s+", "/", n)
+    if "," in n:
+        n = "/".join(p.strip().replace("()", "") for p in n.split(","))
+    n = re.sub(r"\s+", " ", n).strip()
+    return n[:NAMELEN].ljust(NAMELEN)
+
+
+def topic_header(name: str) -> tuple[bytes, bytes]:
+    """A blank separator record and a full-width reverse-video title banner."""
+    blank = b"\x20" * COLS
+    title = (" " + name).upper()[:COLS]
+    banner = bytes(ascii_to_screen(c) | 0x80 for c in title)
+    banner += bytes([RVS_SPACE]) * (COLS - len(banner))
+    return blank, banner
+
+
+def wrap_words(words: list[str], width: int = COLS) -> list[str]:
     out, cur = [], ""
     for w in words:
         cand = (cur + " " + w) if cur else w
-        if len(cand) > COLS and cur:
+        if len(cand) > width and cur:
             out.append(cur)
             cur = w
         else:
@@ -166,351 +188,329 @@ def wrap_words(words: list[str]) -> list[str]:
     return out or [""]
 
 
-VERBATIM = re.compile(r"^(SYNTAX|EXAMPLE|EXAMPLES):\s*$")
-LABEL = re.compile(r"^[A-Z][A-Z &]*:\s*$")
-# 5+ consecutive spaces inside a stripped line signals a PDF two-column layout.
-COL_SEP = re.compile(r" {5,}")
-# A numbered list entry: a code (e.g. 14 or 37-127) followed by an UPPERCASE
-# word. When BOTH halves of a two-column split match, the columns are two halves
-# of one numbered list (e.g. the Appendix B error table, 0-18 | 19-37) that must
-# be flattened one-per-line, NOT joined into "code DESC  code DESC" rows. The
-# uppercase-word requirement excludes value tables like ENVELOPE "0  0.002 secs".
-NUM_ENTRY = re.compile(r"^\d+(-\d+)?\s+[A-Z]")
+def label_value(label: str, value: str) -> list[str]:
+    """A wide-table 'LABEL: value' row, word-wrapped to 40 cols."""
+    return wrap_words(f"{label}: {value}".split())
 
 
-def reflow(lines: list[str]) -> list[str]:
-    out: list[str] = []
-    para: list[str] = []
-    verbatim = False
-    two_col_left: list[str] = []   # accumulated left-column entries
-    two_col_right: list[str] = []  # accumulated right-column entries
-    in_two_col = False             # True only after seeing a twin header (left == right)
+# --------------------------------------------------------------------------- #
+# Table engine
+# --------------------------------------------------------------------------- #
+def _cells(line: str) -> list[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    # split on unescaped pipes only, then unescape literal \| inside cells
+    return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", s)]
 
-    def flush():
-        nonlocal para
-        if para:
-            out.extend(wrap_words(" ".join(para).split()))
-            para = []
 
-    def flush_two_col():
-        """Emit a two-column block as left-column lines then right-column lines."""
-        nonlocal in_two_col
-        if two_col_left:
-            out.extend(two_col_left)
-            out.extend(two_col_right)
-            two_col_left.clear()
-            two_col_right.clear()
-        in_two_col = False
+def parse_gfm(tbl: list[str]) -> tuple[list[str], list[list[str]]]:
+    header = _cells(tbl[0])
+    ncols = len(header)
+    rows = []
+    for ln in tbl[2:]:                        # tbl[1] is the |---| separator
+        c = _cells(ln)
+        c += [""] * (ncols - len(c))
+        rows.append(c[:ncols])
+    return header, rows
 
-    for ln in lines:
-        s = ln.strip()
-        if not s:
-            flush()
-            flush_two_col()
-            # Verbatim mode persists across blank lines; only a non-verbatim
-            # LABEL (DESCRIPTION:, NOTE:, etc.) resets it.
+
+def _col(cells_by_row: list[list[str]], i: int) -> list[str]:
+    return [r[i] if i < len(r) else "" for r in cells_by_row]
+
+
+def _wrap_cell(text: str, width: int) -> list[str]:
+    return wrap_words(text.split(), width) if text else [""]
+
+
+def box_grid(header: list[str], rows: list[list[str]]) -> list[str] | None:
+    """Render a full PETSCII box grid if it fits in 40 cols; else None (too wide).
+
+    Column widths default to the widest cell, then shrink the roomiest columns
+    (never below their longest single word) until the grid fits; cells wrap on
+    whitespace only. Only a header rule separates head from body (no per-row
+    rules), matching the pager's compact grid style."""
+    ncols = len(header)
+    allr = [header] + rows
+    cols = [_col(allr, i) for i in range(ncols)]
+    natw = [max((len(cell) for cell in col), default=1) or 1 for col in cols]
+    minw = [max((max((len(w) for w in cell.split()), default=0) for cell in col),
+                default=1) or 1 for col in cols]
+
+    def total(ws: list[int]) -> int:
+        return sum(ws) + ncols + 1            # borders(ncols+1), no cell padding
+
+    ws = natw[:]
+    while total(ws) > COLS:
+        slack = [(ws[i] - minw[i], i) for i in range(ncols)]
+        best, idx = max(slack)
+        if best <= 0:
+            return None                        # cannot fit even wrapped -> wide mode
+        ws[idx] -= 1
+
+    def hrule(left: str, mid: str, right: str) -> str:
+        return left + mid.join(H * w for w in ws) + right
+
+    def datarow(cells: list[str]) -> list[str]:
+        wrapped = [_wrap_cell(cells[i] if i < len(cells) else "", ws[i])
+                   for i in range(ncols)]
+        height = max(len(c) for c in wrapped)
+        out = []
+        for r in range(height):
+            parts = []
+            for i in range(ncols):
+                seg = wrapped[i][r] if r < len(wrapped[i]) else ""
+                parts.append(seg.ljust(ws[i]))
+            out.append(V + V.join(parts) + V)
+        return out
+
+    lines = [hrule(TL, TT, TR)]
+    lines += datarow(header)
+    lines.append(hrule(LT, XX, RT))
+    for row in rows:
+        lines += datarow(row)
+    lines.append(hrule(BL, BT, BR))
+    return lines
+
+
+def sections_mode(header: list[str], rows: list[list[str]]) -> list[str | bytes]:
+    """Wide fallback: each row -> a normal (non-reversed) sub-header from the first
+    column, a PETSCII dash then a space, the title, a trailing space, and dashes out
+    to the 40th column, then 'HEADER: value' lines for the remaining non-empty cells.
+    A pure 2-column table (one value column) drops the redundant label and emits the
+    value as plain full-width text, since the sub-header already names the entry."""
+    single = len(header) == 2
+    out: list[str | bytes] = []
+    for row in rows:
+        head = H + " " + row[0] + " "
+        head += H * (COLS - len(head))
+        out.append(head)
+        for h, v in zip(header[1:], row[1:]):
+            if v.strip():
+                out.extend(wrap_words(v.split()) if single else label_value(h, v))
+    return out
+
+
+def cards_mode(header: list[str], rows: list[list[str]],
+               key: list[str], span: list[str], pack: int | None) -> list[str | bytes]:
+    """Wide layout: pack the small `key` columns together compactly (LABEL: value
+    pairs, `pack` per line max), then emit each wide `span` column as a full-width
+    'HEADER: value' wrapped row beneath. Empty cells are skipped."""
+    idx = {h: i for i, h in enumerate(header)}
+    key_i = [idx[k] for k in key if k in idx]
+    span_i = [idx[s] for s in span if s in idx]
+    # Any column named in neither key nor span still shows, as a span row.
+    named = set(key_i) | set(span_i)
+    span_i += [i for i in range(len(header)) if i not in named]
+
+    out: list[str | bytes] = []
+    for r, row in enumerate(rows):
+        if r:
             out.append("")
-            continue
-        if LABEL.match(s):
-            flush()
-            flush_two_col()
-            verbatim = bool(VERBATIM.match(s))
-            out.append(s)
-            continue
-        if verbatim:
-            out.extend([s] if len(ln) <= COLS else wrap_words(ln.split()))
+        pairs = [f"{header[i]}: {row[i]}" for i in key_i
+                 if i < len(row) and row[i].strip()]
+        cur: list[str] = []
+        for p in pairs:
+            cand = cur + [p]
+            joined = "  ".join(cand)
+            if (pack and len(cand) > pack) or (len(joined) > COLS and cur):
+                out.append("  ".join(cur))
+                cur = [p]
+            else:
+                cur = cand
+        if cur:
+            out.append("  ".join(cur))
+        for i in span_i:
+            if i < len(row) and row[i].strip():
+                out.extend(label_value(header[i], row[i]))
+    return out
+
+
+DIRECTIVE_RE = re.compile(r"<!--\s*table:\s*(.*?)\s*-->")
+
+
+def parse_directive(text: str) -> dict[str, object]:
+    m = DIRECTIVE_RE.search(text)
+    opts: dict[str, object] = {}
+    if not m:
+        return opts
+    for tok in m.group(1).split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            opts[k] = int(v) if k == "pack" and v.isdigit() else v
         else:
-            # Detect a PDF two-column layout: 5+ spaces between two non-empty halves.
-            # Use the widest gap to split — some tables have 5+ spaces within
-            # a half (e.g. ENVELOPE "0      0.002 seconds") so the first match
-            # can fall inside the left half rather than between the two halves.
-            _all = list(COL_SEP.finditer(s))
-            m = max(_all, key=lambda x: x.end() - x.start()) if _all else None
-            if m and m.start() > 0 and m.end() < len(s):
-                left = " ".join(s[:m.start()].split())
-                right = " ".join(s[m.end():].split())
-                if left and right:
-                    if not in_two_col:
-                        # Two halves of a numbered list (the error table): accumulate
-                        # as a two-column block so it flattens to the left column then
-                        # the right column, one entry per line and in order.
-                        if NUM_ENTRY.match(left) and NUM_ENTRY.match(right):
-                            in_two_col = True
-                            two_col_left.append(left)
-                            two_col_right.append(right)
-                            continue
-                        # Only enter twin-table mode when the header repeats
-                        # itself (e.g. "VALUE COLOR  VALUE COLOR"). A multi-
-                        # column table with distinct headers falls through to
-                        # normal paragraph handling instead.
-                        if left == right:
-                            in_two_col = True
-                            two_col_left.append(left)  # header added once
-                            continue
-                        # A short left side (≤15 chars) signals a table row
-                        # (e.g. "c1", "n/a, Restricted", "Bitmap Graphics"):
-                        # emit left + right as one wrapped line immediately.
-                        if len(left) <= 15:
-                            flush()
-                            flush_two_col()
-                            out.extend(wrap_words((left + " " + right).split()))
-                            continue
-                        # else: fall through to normal processing below
-                    else:
-                        # Inside a twin-table block: accumulate both halves.
-                        two_col_left.append(left)
-                        two_col_right.append(right)
-                        continue
-            # Not a two-column line (or not in twin-table mode) — flush any
-            # accumulated two-col block first.
-            if in_two_col:
-                flush_two_col()
-            # Flush before digit-starting lines regardless of length (long
-            # numbered table rows like INF 10-70), and before any short line
-            # that follows a colon-ended paragraph introduction.
-            if para and (s[0].isdigit() or
-                         (len(s) < 58 and para[-1].rstrip().endswith(':'))):
-                flush()
-            para.append(s)
-            # Short source lines are structural (table rows, list items, the
-            # tail of a sentence): end the paragraph so they stay one-per-row.
-            if len(s) < 58:
-                flush()
-    flush()
-    flush_two_col()
-    return out
+            opts[tok] = True
+    return opts
 
 
-def topic_text(lines: list[str], start: int, end: int) -> list[str]:
-    return reflow(clean(lines[start:end]))
+def render_table(tbl: list[str], directive: dict[str, object] | None) -> list[str | bytes]:
+    header, rows = parse_gfm(tbl)
+    directive = directive or {}
+    mode = directive.get("mode")
+    if mode is None:
+        grid = box_grid(header, rows)
+        if grid is not None:
+            return list(grid)
+        mode = "sections"                      # too wide, no directive -> sections
+    if mode == "grid":
+        grid = box_grid(header, rows)
+        return list(grid) if grid is not None else sections_mode(header, rows)
+    if mode == "cards":
+        key = str(directive.get("key", "")).split(",") if directive.get("key") else []
+        span = str(directive.get("span", "")).split(",") if directive.get("span") else []
+        key = [k for k in key if k]
+        span = [s for s in span if s]
+        pack = directive.get("pack")
+        return cards_mode(header, rows, key, span, pack if isinstance(pack, int) else None)
+    return sections_mode(header, rows)
 
 
-def ascii_to_screen(c: str) -> int:
-    """ASCII -> C64 screen code (lowercase/uppercase charset)."""
-    o = ord(c)
-    if 0x20 <= o <= 0x3F:
-        return o
-    if o == 0x40:
-        return 0x00
-    if 0x41 <= o <= 0x5A:
-        return o                 # uppercase A-Z -> screen codes $41-$5A (display uppercase)
-    if 0x5B <= o <= 0x5F:
-        return o - 0x40
-    if o == 0x7C:                # | -> shifted-B
-        return 0x42
-    if 0x61 <= o <= 0x7A:        # lowercase a-z -> screen codes $01-$1A (display lowercase)
-        return o - 0x60
-    return 0x20                  # anything else -> space
+# --------------------------------------------------------------------------- #
+# Markdown parsing
+# --------------------------------------------------------------------------- #
+LABEL = re.compile(r"^[A-Z][A-Z &/]*:\s*$")
 
 
-def display_name(name: str) -> str:
-    """Produce a NAMELEN-char uppercase display name, space-padded, as a plain string.
-
-    The 2-column search grid is wide enough (19 chars) to keep the disambiguating
-    qualifiers, just abbreviated so the long ones fit:
-      KEY (statement)          -> KEY (STMT)
-      KEY and KEY$ (variables) -> KEY/KEY$ (VARS)
-      TIME and TIME$           -> TIME/TIME$
-      VALB(), VALH(), VALO()   -> VALB/VALH/VALO
-    Single-function headers keep their "()" marker (HEX$() -> HEX$()).
-    """
-    n = name.upper().strip()
-    n = n.replace("(STATEMENT)", "(STMT)")    # abbreviate the (kind) qualifiers
-    n = n.replace("(VARIABLES)", "(VARS)")
-    n = n.replace("(VARIABLE)", "(VAR)")
-    n = re.sub(r"\s+AND\s+", "/", n)          # "KEY and KEY$" -> "KEY/KEY$"
-    if "," in n:                              # "VALB(), VALH(), VALO()" -> "VALB/VALH/VALO"
-        n = "/".join(p.strip().replace("()", "") for p in n.split(","))
-    n = re.sub(r"\s+", " ", n).strip()
-    return n[:NAMELEN].ljust(NAMELEN)
+def is_table_row(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.count("|") >= 2
 
 
-def line_to_record(text: str) -> bytes:
-    text = text[:COLS]
-    rec = bytes(ascii_to_screen(c) for c in text)
-    return rec + b"\x20" * (COLS - len(rec))
+def is_separator(line: str) -> bool:
+    s = line.strip().strip("|").strip()
+    return bool(s) and set(s.replace("|", "")) <= set("-: ") and "-" in s
 
 
-RVS_SPACE = 0x20 | 0x80         # reverse-video space, fills the title banner
+def split_frontmatter(text: str) -> tuple[dict[str, str], list[str]]:
+    lines = text.splitlines()
+    meta: dict[str, str] = {}
+    if lines and lines[0].strip() == "---":
+        i = 1
+        while i < len(lines) and lines[i].strip() != "---":
+            if ":" in lines[i]:
+                k, v = lines[i].split(":", 1)
+                meta[k.strip()] = v.strip()
+            i += 1
+        return meta, lines[i + 1:]
+    return meta, lines
 
 
-def topic_header(name: str) -> list[bytes]:
-    """Two lead-in records that delimit a topic: a blank separator line and the
-    topic title as a full-width reverse-video banner."""
-    blank = b"\x20" * COLS
-    title = (" " + name).upper()[:COLS]
-    banner = bytes(ascii_to_screen(c) | 0x80 for c in title)
-    banner += bytes([RVS_SPACE]) * (COLS - len(banner))
-    return [blank, banner]
+def render_body(raw: list[str]) -> list[str | bytes]:
+    out: list[str | bytes] = []
+    i, n = 0, len(raw)
+    while i < n:
+        line = raw[i]
+        s = line.rstrip()
+        stripped = s.strip()
 
-
-# The appendices are reference tables / prose (not PURPOSE-anchored command
-# blocks), so find_sections cannot pick them up — they are extracted separately
-# and given a short (<=19-char) grid/banner name. Each appendix runs from its
-# "APPENDIX x" header to the next appendix (H runs to BIBLIOGRAPHY / end). The
-# musical-notes table in E is an image and is not extractable, so E carries only
-# its descriptive prose. The BIBLIOGRAPHY page is not included.
-APPENDIX_RE = re.compile(r"^APPENDIX ([A-H])$")
-APPENDIX_LETTERS = "ABCDEFGH"
-APPENDIX_NAMES = {
-    "A": "APPENDIX A: SCREENS",
-    "B": "APPENDIX B: ERRORS",
-    "C": "APPENDIX C: ASCII",
-    "D": "APPENDIX D: RS-232",
-    "E": "APPENDIX E: NOTES",
-    "F": "APPENDIX F: TERMS",
-    "G": "APPENDIX G: SAMPLES",
-    "H": "APPENDIX H: TIPS",
-}
-
-# Front matter (Preface .. User Reference Guide intro), extracted as topics that
-# lead the guide. Each entry is (exact PDF header, <=19-char grid/banner name);
-# the real header line is stripped from the body so it is not shown twice.
-FRONTMATTER = [
-    ("PREFACE", "PREFACE"),
-    ("INSTALLATION", "INSTALLATION"),
-    ("FEATURES & ENHANCEMENTS", "FEATURES & ENHANCE."),
-    ("NOMENCLATURE", "NOMENCLATURE"),
-    ("USER REFERENCE GUIDE", "USER REF. GUIDE"),
-]
-
-# This page is the ONLY content not extracted from the PDF — a note about the
-# on-screen guide itself. It makes clear that everything else is Mark Bowren's
-# work, merely reflowed to 40 columns, and points the reader at the full manual.
-# Lines are pre-wrapped to <=40 columns.
-ABOUT_NAME = "ABOUT THIS GUIDE"
-ABOUT_TEXT = [
-    "Besides this quick note, all the text",
-    "that follows comes directly from the",
-    "MDBASIC manual written by Mark Bowren.",
-    "The text has been adapted to fit the",
-    "40-column screen of the Commodore 64.",
-    "",
-    "The reflow to 40 columns means some",
-    "detail, tables, and examples could not",
-    "be reproduced here. For the complete,",
-    "unabridged documentation, look for",
-    "Mark's original MDBASIC manual.",
-    "",
-    "With deep gratitude and respect for his",
-    "work, and for keeping the Commodore 64",
-    "alive and fun to program.",
-    "",
-    "Thank you, Mark.",
-]
-
-
-def frontmatter_topics(lines: list[str]) -> list[tuple[str, int, list[str]]]:
-    """Extract the Preface .. User Reference Guide intro (token 0; name/start nav)."""
-    pos: dict[str, int] = {}
-    headers = [h for h, _ in FRONTMATTER]
-    for i, ln in enumerate(lines):
-        s = ln.strip()                       # TOC lines carry trailing dots, so an
-        if s in headers and s not in pos:    # exact match only hits the body header
-            pos[s] = i
-    sections = find_sections(lines)
-    guide_start = sections[0][1] if sections else len(lines)
-    out = []
-    for j, (hdr, gridname) in enumerate(FRONTMATTER):
-        if hdr not in pos:
+        # fenced code block: verbatim (wrap only if a line exceeds 40 cols)
+        if stripped.startswith("```"):
+            i += 1
+            while i < n and not raw[i].strip().startswith("```"):
+                code = raw[i].rstrip()
+                out.extend([code] if len(code) <= COLS else wrap_words(code.split()))
+                i += 1
+            i += 1
             continue
-        # The URG intro ends where the first command section (AUTO) begins; the
-        # others end at the next front-matter header.
-        if hdr == "USER REFERENCE GUIDE":
-            end = guide_start
-        else:
-            nxt = FRONTMATTER[j + 1][0]
-            end = pos.get(nxt, len(lines))
-        body = topic_text(lines, pos[hdr], end)
-        if body and body[0].strip().upper() == hdr.upper():
-            body = body[1:]                  # drop the header (shown as a banner)
-        out.append((gridname, 0, body))
-    return out
+
+        # table directive (may precede a table) or comment block
+        if stripped.startswith("<!--"):
+            if DIRECTIVE_RE.search(stripped) and i + 2 < n \
+               and is_table_row(raw[i + 1]) and is_separator(raw[i + 2]):
+                directive = parse_directive(stripped)
+                i += 1
+                tbl = []
+                while i < n and is_table_row(raw[i]):
+                    tbl.append(raw[i])
+                    i += 1
+                out.extend(render_table(tbl, directive))
+                continue
+            # plain comment: drop until the closing --> (possibly multi-line)
+            while i < n and "-->" not in raw[i]:
+                i += 1
+            i += 1
+            continue
+
+        # GFM table without a directive
+        if is_table_row(s) and i + 1 < n and is_separator(raw[i + 1]):
+            tbl = []
+            while i < n and is_table_row(raw[i]):
+                tbl.append(raw[i])
+                i += 1
+            out.extend(render_table(tbl, None))
+            continue
+
+        # blank
+        if not stripped:
+            out.append("")
+            i += 1
+            continue
+
+        # ATX heading marker -> strip leading #'s (shown via banner already)
+        if stripped.startswith("#"):
+            stripped = stripped.lstrip("#").strip()
+
+        # any other line: passthrough; word-wrap only if it overflows 40 cols
+        out.extend([stripped] if len(stripped) <= COLS else wrap_words(stripped.split()))
+        i += 1
+
+    # collapse runs of blank records to one, then trim leading/trailing blanks
+    collapsed: list[str | bytes] = []
+    for it in out:
+        if it == "" and collapsed and collapsed[-1] == "":
+            continue
+        collapsed.append(it)
+    while collapsed and collapsed[0] == "":
+        collapsed.pop(0)
+    while collapsed and collapsed[-1] == "":
+        collapsed.pop()
+    return collapsed
 
 
-def appendix_topics(lines: list[str]) -> list[tuple[str, int, list[str]]]:
-    """Extract appendices A-H as topics (token 0; nav is by name/start, not token)."""
-    pos: dict[str, int] = {}
-    for i, ln in enumerate(lines):
-        m = APPENDIX_RE.match(ln.strip())
-        if m and m.group(1) not in pos:
-            pos[m.group(1)] = i
-    # The last appendix (H) ends at BIBLIOGRAPHY; its TOC line has trailing dots,
-    # so the bare-word match lands on the body header only.
-    end_all = len(lines)
-    for i, ln in enumerate(lines):
-        if ln.strip().upper() == "BIBLIOGRAPHY":
-            end_all = i
-            break
-    letters = [c for c in APPENDIX_LETTERS if c in pos]
-    out = []
-    for k, letter in enumerate(letters):
-        end = pos[letters[k + 1]] if k + 1 < len(letters) else end_all
-        body = topic_text(lines, pos[letter], end)
-        # Drop the leading "APPENDIX X" line — the pager shows the name as a banner.
-        if body and body[0].strip().upper() == f"APPENDIX {letter}":
-            body = body[1:]
-        out.append((APPENDIX_NAMES[letter], 0, body))
-    return out
-
-
-def bibliography_topic(lines: list[str]) -> list[tuple[str, int, list[str]]]:
-    """Extract the closing BIBLIOGRAPHY as the final topic (token 0)."""
-    start = None
-    for i, ln in enumerate(lines):
-        if ln.strip().upper() == "BIBLIOGRAPHY":   # body header, not the dotted TOC
-            start = i
-    if start is None:
-        return []
-    body = topic_text(lines, start, len(lines))
-    if body and body[0].strip().upper() == "BIBLIOGRAPHY":
-        body = body[1:]
-    return [("BIBLIOGRAPHY", 0, body)]
-
-
-def build_topics(lines: list[str]):
-    """Return (topics, mdtok) where topics = [(name, token, [text lines])]."""
+def load_topics() -> list[tuple[str, int, list[str | bytes], int]]:
+    """Return [(name, token, [rendered items], order)] sorted by order."""
     mdtok = mdbasic_tokens()
-    # The about page leads the list so it is the default selection on open, then
-    # the front matter (Preface .. User Reference Guide) before the command list.
-    topics = [(ABOUT_NAME, 0, list(ABOUT_TEXT))]
-    topics.extend(frontmatter_topics(lines))
-    for name, s, e in find_sections(lines):
-        body = topic_text(lines, s, e)
-        # The body's first line is the section header (the topic name); the pager
-        # now shows it as a reverse-video banner, so drop the duplicate.
-        if body and body[0].strip().upper() == name.strip().upper():
-            body = body[1:]
-        tok = topic_token(name, mdtok)
-        topics.append((name, tok, body))
-    topics.extend(appendix_topics(lines))
-    topics.extend(bibliography_topic(lines))
-    return topics, mdtok
+    topics = []
+    for path in sorted(MANUAL.glob("*.md")):
+        meta, body = split_frontmatter(path.read_text())
+        name = meta.get("name", path.stem)
+        order = int(meta["order"]) if meta.get("order", "").lstrip("-").isdigit() \
+            else _order_from_stem(path.stem)
+        tokspec = meta.get("token", "auto").strip().lower()
+        if tokspec in ("", "auto"):
+            token = topic_token(name, mdtok) or 0
+        elif tokspec in ("none", "0"):
+            token = 0
+        else:
+            token = int(tokspec, 0) & 0xFF
+        topics.append((name, token, render_body(body), order))
+    topics.sort(key=lambda t: t[3])
+    return topics
 
 
+def _order_from_stem(stem: str) -> int:
+    m = re.match(r"(\d+)", stem)
+    return int(m.group(1)) if m else 9999
+
+
+# --------------------------------------------------------------------------- #
+# Packing (unchanged output format)
+# --------------------------------------------------------------------------- #
 def build_index_and_data() -> tuple[bytes, bytes, int, int]:
-    """Return (index_blob, data_blob, total_lines, data_banks).
-
-    index_blob: 'MDIX' magic, u16 topic_count, u16 total_lines, then 5-byte
-                entries {token, start_line(u16), line_count(u16)}. Goes at a
-                fixed offset in cart bank 3, alongside the pager code.
-    data_blob:  cart banks 4+ : 204 fixed 40-byte line records per 8 KB bank,
-                each bank padded to 8 KB so a line never straddles a bank.
-    The pager maps global line L -> Magic Desk bank DATA_BANK0 + L//204,
-    addr $8000 + (L%204)*40.
-    """
-    lines = pdf_text()
-    topics, _ = build_topics(lines)
+    topics = load_topics()
 
     records: list[bytes] = []
-    index: list[tuple[int, int, int, str]] = []  # token, start, count, name
-    for name, tok, body in topics:
+    index: list[tuple[int, int, int, str]] = []
+    for name, tok, body, _order in topics:
         blank, banner = topic_header(name)
-        start = len(records)                 # jump/nav target = title banner
+        start = len(records)
         records.append(banner)
-        records.extend(line_to_record(t) for t in body)
-        index.append((tok if tok is not None else 0, start, len(records) - start, name))
-        records.append(blank)                # end-of-topic separator (not in range)
+        records.append(blank)                # uniform 1-line gap under the banner
+        records.extend(to_record(it) for it in body)
+        index.append((tok, start, len(records) - start, name))
+        records.append(blank)
 
     total_lines = len(records)
     data_banks = (total_lines + LINES_PER_BANK - 1) // LINES_PER_BANK
@@ -525,8 +525,8 @@ def build_index_and_data() -> tuple[bytes, bytes, int, int]:
     data = bytearray()
     for b in range(data_banks):
         chunk = b"".join(records[b * LINES_PER_BANK:(b + 1) * LINES_PER_BANK])
-        chunk += b"\x20" * (LINES_PER_BANK * COLS - len(chunk))   # pad lines
-        chunk += b"\x00" * (BANK_SIZE - len(chunk))               # pad bank
+        chunk += b"\x20" * (LINES_PER_BANK * COLS - len(chunk))
+        chunk += b"\x00" * (BANK_SIZE - len(chunk))
         data += chunk
     return bytes(idx), bytes(data), total_lines, data_banks
 
@@ -548,6 +548,30 @@ def pack(out_path: Path) -> None:
               f"$8c00-$97ff in bank {INDEX_BANK} (RESTORE handler at $9800)")
 
 
+def _preview_text(item: str | bytes) -> str:
+    if isinstance(item, bytes):
+        return "".join(chr(0x20 + (b & 0x7f)) if False else _sc_to_char(b) for b in item)
+    return item
+
+
+_SC_BOX = {v: k for k, v in BOX_SCREEN.items()}
+
+
+def _sc_to_char(b: int) -> str:
+    c = b & 0x7F
+    if c in _SC_BOX:
+        return _SC_BOX[c]
+    if c == 0x00:
+        return "@"
+    if 0x01 <= c <= 0x1A:
+        return chr(ord("a") + c - 1)
+    if 0x20 <= c <= 0x3F:
+        return chr(c)
+    if 0x41 <= c <= 0x5A:
+        return chr(c)
+    return " "
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true")
@@ -559,23 +583,23 @@ def main() -> int:
         pack(Path(args.pack))
         return 0
 
-    lines = pdf_text()
-    topics, mdtok = build_topics(lines)
+    topics = load_topics()
 
     if args.list or args.preview is None:
         print(f"{len(topics)} topics:")
-        for name, tok, body in topics:
-            ts = f"${tok:02x}" if tok is not None else " - "
-            print(f"  {name:<10} {ts}  {len(body):3d} lines")
+        for name, tok, body, _order in topics:
+            ts = f"${tok:02x}" if tok else " - "
+            print(f"  {name:<24} {ts}  {len(body):3d} lines")
         return 0
 
     want = {w.upper() for w in args.preview}
-    for name, tok, body in topics:
-        if want and name.replace("()", "").upper() not in want \
-           and name.upper() not in want:
+    for name, tok, body, _order in topics:
+        key = name.replace("()", "").upper()
+        if want and key not in want and name.upper() not in want:
             continue
-        print(f"===== {name}  ({len(body)} lines) " + "=" * (COLS - len(name) - 18))
-        print("\n".join("|" + b for b in body))
+        print(f"===== {name}  ({len(body)} lines) " + "=" * max(0, COLS - len(name) - 18))
+        for it in body:
+            print("|" + _preview_text(it))
         print()
     return 0
 

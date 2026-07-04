@@ -186,6 +186,9 @@ dv_exit jmp exit     ;trampoline: exit is out of direct branch range
 dv_f2
  lda #0
  sta mode
+ sta filtlen         ;clear search filter -> fresh search page, as if just opened
+ sta selvis
+ sta scrolltop
  jmp mainloop
 dv_top
  lda #0

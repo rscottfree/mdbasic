@@ -40,6 +40,40 @@ PORT = 6554
 HANDLER_ADDR = 0x033c          # boot entry the cart NMI vector ($8002) points at
 STUB_ADDR = 0x0390             # scratch above the $033c handler ($033c-$038d used)
 
+# PETSCII box-grid corner/tee/cross screen codes (no vertical $5d, which is common).
+BOX_CODES = {0x70, 0x6E, 0x6D, 0x7D, 0x6B, 0x73, 0x72, 0x71, 0x5B}
+
+
+def table_offsets(topic: str) -> tuple[int, int]:
+    """Line offsets (from the topic banner) of the first wide-table 'SCREEN RAM:'
+    sections row and the first box-grid corner (top-left, screen code $70), read
+    from the packed records so the test scrolls exactly to each rendered table."""
+    import struct
+    idx, data, _tot, _banks = build_docs.build_index_and_data()
+    n = struct.unpack("<H", idx[4:6])[0]
+    lpb, cols, bank = build_docs.LINES_PER_BANK, build_docs.COLS, build_docs.BANK_SIZE
+
+    def rec(L: int) -> bytes:
+        o = (L // lpb) * bank + (L % lpb) * cols
+        return data[o:o + cols]
+
+    off = 8
+    for _ in range(n):
+        tok, start, count = struct.unpack("<BHH", idx[off:off + 5])
+        name = bytes(idx[off + 5:off + 24]).rstrip().decode("latin1")
+        off += build_docs.IXSTRIDE
+        if name == topic:
+            sect = box = 0
+            for k in range(count):
+                r = rec(start + k)
+                txt = "".join(chr(b & 0x7F) for b in r)
+                if not sect and "SCREEN" in txt and "RAM:" in txt:
+                    sect = k
+                if not box and 0x70 in r:
+                    box = k
+            return sect, box
+    raise RuntimeError(f"topic {topic!r} not found")
+
 
 def nmi_frame_stub(dodocs: int) -> bytes:
     """A tiny 6502 stub that fabricates a synthetic NMI return frame, then jumps
@@ -168,6 +202,29 @@ def main() -> int:
         time.sleep(0.7)
         s = harness.connect_monitor(PORT, 20.0)
         results["scroll_up"] = harness.screen_text(s).upper() != doc_scrolled
+        s.close()
+        # --- table engine: SCREEN carries a wide (sections) table and a narrow
+        # PETSCII box grid; return to search, jump to it, scroll each into view. ---
+        sect_k, box_k = table_offsets("SCREEN")
+        harness.keyboard_type_on_port(PORT, "\x89")               # F2 -> search page
+        time.sleep(0.6)
+        harness.keyboard_type_on_port(PORT, "\x93")               # SHIFT+CLR: clear filter
+        time.sleep(0.3)
+        harness.keyboard_type_on_port(PORT, "SCREEN\r")           # jump to SCREEN topic
+        time.sleep(0.7)
+        harness.keyboard_type_on_port(PORT, "\x11" * max(0, sect_k - 4))  # scroll to sections
+        time.sleep(0.8)
+        s = harness.connect_monitor(PORT, 20.0)
+        wide = harness.screen_text(s).upper()
+        results["table_wide_render"] = "SCREEN RAM:" in wide      # sections LABEL: value row
+        s.close()
+        harness.keyboard_type_on_port(PORT, "\x11" * max(0, box_k - sect_k))  # on to box grid
+        time.sleep(0.8)
+        s = harness.connect_monitor(PORT, 20.0)
+        raw = harness.mem_get(s, 0x0400, 0x07E7)
+        box_txt = harness.screen_text(s).upper()
+        results["table_box_glyphs"] = any(b in BOX_CODES for b in raw)   # grid drawn
+        results["table_box_header"] = "MODE" in box_txt and "BITMAP" in box_txt
         s.close()
         harness.keyboard_type_on_port(PORT, "\x03")               # RUN/STOP exit
         time.sleep(0.5)
