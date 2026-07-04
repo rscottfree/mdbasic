@@ -113,6 +113,8 @@ entry
  sta savbg
  lda COLOR
  sta savfg
+ lda HIBASE          ;remember whether we came from the $0400 text screen (page 0)
+ sta savhib          ;or a SCREEN 1-5 page, so exit can clean up the editor state
  lda U64SPEED        ;Ultimate 64: save the current turbo speed bits, then run flat
  sta savturbo        ;out (harmless on stock C64/VICE - $d031 reads $ff, drops writes)
  ora #$0f            ;speed index 15 = max turbo (48/64 MHz); badline bit 7 preserved
@@ -445,6 +447,17 @@ exit
  sta VMCSB
  lda #$04
  sta HIBASE         ;kernal prints to $0400
+ ;If we came from a SCREEN 1-5 page (savhib != $04), that page's content was
+ ;never saved (SCRBUF only holds $0400) and the editor's line-link table + PNT
+ ;still point at it -- so the restored $0400 cursor pointer is stale and the
+ ;cursor won't reappear until a key is pressed. Clear to a fresh $0400 screen:
+ ;that rebuilds the link table, homes the cursor, and fixes PNT. Page 0
+ ;(savhib = $04) keeps its restored screen and cursor untouched.
+ lda savhib
+ cmp #$04
+ beq exdone
+ jsr CLRSCR
+exdone
  lda savturbo
  sta U64SPEED        ;restore the Ultimate 64 turbo speed bits
  lda sav01
@@ -1406,6 +1419,7 @@ savkey   .word 0      ;saved KEYLOG vector (MDBASIC's keychk)
 savbdr   .byte 0      ;saved border color
 savbg    .byte 0      ;saved background color
 savfg    .byte 0      ;saved foreground color
+savhib   .byte 0      ;saved HIBASE ($0288): screen page at docs entry ($04 = page 0)
 savturbo .byte 0      ;saved Ultimate 64 turbo speed register ($d031)
 savd3    .byte 0      ;saved cursor column (PNTR $d3)
 savd6    .byte 0      ;saved cursor row (TBLX $d6)
