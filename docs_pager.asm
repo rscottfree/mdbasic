@@ -4,8 +4,7 @@
 ; Stored in cart bank 3 at $8000; the RESTORE handler copies it to $c000 and
 ; JSRs it (see docs-pager design). Assembled for $c000 (run location).
 ;
-;   on entry: $02 = topic token (always 0 from docs_help.asm); bank 3 paged in
-;             only long enough for the hook's code copy.
+;   on entry: bank 3 paged in only long enough for the hook's code copy.
 ;   on exit:  cart paged out, NMI/cursor/$01 restored, screen cleared, RTS.
 ;
 ; Pager opens on a SEARCH page (mode=0). The user types to filter the keyword
@@ -31,7 +30,7 @@ GRIDTOP      = 2      ;first scrolling grid row (rows 0-1 fixed: search + rule)
 VISROWS      = 20     ;visible grid rows (rows 2-21; rows 22-24 fixed: rule+legend)
 
 ; --- zero page / kernal ---
-TOPICTOK = $02        ;topic token passed by the RESTORE handler (unused zp)
+TMP      = $02        ;free zp scratch (color-pack nybble, grid/status OR mask)
 SRCP     = $fb        ;source pointer (cart read)    -- graphics temp, free here
 SCRP     = $fd        ;screen dest pointer           -- graphics temp, free here
 R6510    = $01
@@ -123,10 +122,9 @@ entry
  lda #0
  sta EXTCOL          ;black border
  sta BGCOL0          ;black background
+ sta SPENA           ;all sprites off
  lda #14
  sta COLOR           ;light blue foreground
- lda #0
- sta SPENA           ;all sprites off
  jsr savescreen      ;snapshot screen RAM + cursor pos so exit can restore them
  jsr savecolor       ;snapshot color RAM (packed 2:1) before fillcolor overwrites it
  jsr forcetext       ;standard text screen at $0400 (in case graphics was on)
@@ -148,6 +146,8 @@ mainloop
 ; that stops on release); every other key jumps directly. (A pixel-smooth scroll
 ; was attempted twice and reverted -- see docs/smooth-scroll-attempt.md.)
 docview
+ jsr drawbar         ;status bar once per view entry (render never touches row 24)
+dv_loop
  jsr render          ;draw the page from topline (CLIs on exit)
 dv_wait
  jsr GETIN
@@ -176,10 +176,10 @@ dv_wait
 
 dv_down
  jsr linedown
- jmp docview
+ jmp dv_loop
 dv_up
  jsr lineup
- jmp docview
+ jmp dv_loop
 
 dv_exit jmp exit     ;trampoline: exit is out of direct branch range
 
@@ -194,27 +194,27 @@ dv_top
  lda #0
  sta topline
  sta topline+1
- jmp docview
+ jmp dv_loop
 dv_pgdn
  ldx #ROWS-1
 dpd1
  jsr linedown
  dex
  bne dpd1
- jmp docview
+ jmp dv_loop
 dv_pgup
  ldx #ROWS-1
 dpu1
  jsr lineup
  dex
  bne dpu1
- jmp docview
+ jmp dv_loop
 dv_prevtop
  jsr prevtopic
- jmp docview
+ jmp dv_loop
 dv_nexttop
  jsr nexttopic
- jmp docview
+ jmp dv_loop
 
 ;==================== search page ====================
 ml_search
@@ -255,9 +255,7 @@ input_search
  bcs input_search    ;filter full -> ignore
  sta filtbuf,x
  inc filtlen
- lda #0
- sta selvis
- jmp search_upd
+ jmp filt_upd
 
 is_xit   jmp exit   ;trampolines: targets are out of direct branch range
 is_seljmp  jmp is_select
@@ -272,28 +270,29 @@ is_del
  lda filtlen
  beq input_search
  dec filtlen
- lda #0
- sta selvis
- jmp search_upd
+ jmp filt_upd
 
 is_clr
  lda filtlen
  beq input_search    ;already empty -> nothing to redraw
  lda #0
  sta filtlen
+ ;fall into filt_upd
+
+; Filter edits reset the selection to the first match, then redraw. Selection
+; moves change selvis and jump to search_upd, which redraws the grid in place
+; (draw_grid: re-counts matches, scrolls to keep the selection visible, inverts
+; the selected cell) without clearing the page -- so there is no flash. selvis
+; wraps within numvis. CRSR left/right step by one entry; CRSR up/down step by
+; a row (NCOLS entries), same column. The grid is 2 columns; a row = NCOLS=2.
+filt_upd
+ lda #0
  sta selvis
- jmp search_upd
-
-; Selection moves change selvis and jump to search_upd, which redraws the grid in
-; place (draw_grid: re-counts matches, scrolls to keep the selection visible,
-; inverts the selected cell) without clearing the page -- so there is no flash.
-; selvis wraps within numvis. CRSR left/right step by one entry; CRSR up/down step
-; by a row (NCOLS entries), same column. The grid is 2 columns; a row = NCOLS=2.
-is_nop
- jmp input_search
-
 search_upd             ;redraw grid in place, then keep polling
  jsr draw_grid
+ jmp input_search
+
+is_nop
  jmp input_search
 
 is_next
@@ -484,35 +483,24 @@ pageout
  rts
 
 ;==================== scroll helpers ====================
-; linedown: topline++ clamped to totlines-1
+; linedown: topline++ clamped to totlines-1 (compute topline+1 in Y:A, store
+; only if it is still < totlines)
 linedown
- lda topline+1
- cmp totlines+1
- bcc ld_ok
+ ldy topline+1
+ lda topline
+ clc
+ adc #1
+ bcc ld_cmp
+ iny
+ld_cmp
+ cpy totlines+1
+ bcc ld_store
  bne ld_no
- lda topline
- cmp totlines       ;topline < totlines ?
- bcs ld_clamp
-ld_ok
- inc topline
- bne ld_done
- inc topline+1
-ld_done
- lda topline+1
- cmp totlines+1
- bcc ld_no
- bne ld_clamp
- lda topline
  cmp totlines
- bcc ld_no
-ld_clamp
- lda totlines
- sec
- sbc #1
+ bcs ld_no
+ld_store
  sta topline
- lda totlines+1
- sbc #0
- sta topline+1
+ sty topline+1
 ld_no
  rts
 
@@ -545,8 +533,10 @@ scanindex
  rts
 
 ;==================== render (doc page) ====================
-; draw ROWS-1 doc lines starting at topline, then a reverse-video status bar of
-; the doc-view key bindings on the last row. cart paged in under sei.
+; draw ROWS-1 doc lines starting at topline. cart paged in under sei. The
+; reverse-video status bar on the last row is drawn once per view entry by
+; drawbar (docview); render never touches that row, so it needs no redraw
+; per scroll step.
 render
  jsr divmod
  jsr srcfromwr
@@ -623,9 +613,12 @@ rl_next
  lda row
  cmp #ROWS-1         ;leave the last row for the status bar
  bne rowloop
- lda #$80
- sta CART            ;cart out; the status data lives in our $c000 image
- ;--- reverse-video status bar of doc-view keys on the last row ---
+ jmp pageout         ;cart out + cli
+
+;==================== drawbar ====================
+; reverse-video status bar of the doc-view keys on the last row. cart is out
+; here (between keys); the legend lives in our $c000 image.
+drawbar
  lda #<docleg
  sta SRCP
  lda #>docleg
@@ -634,33 +627,14 @@ rl_next
  sta SCRP
  lda #>(SCREEN+((ROWS-1)*COLS))
  sta SCRP+1
- jsr drawstatus
- cli
- rts
+ lda #$80
+ sta TMP             ;reverse-video mask
+ jmp drawtext
 
 ; SRCP = $8000 + wr*40   (wr in 0..203)
 srcfromwr
  lda wr
- sta mlo
- lda #0
- sta mhi
- asl mlo
- rol mhi            ;*2
- asl mlo
- rol mhi            ;*4
- lda mlo
- clc
- adc wr
- sta mlo
- lda mhi
- adc #0
- sta mhi            ;*5
- asl mlo
- rol mhi
- asl mlo
- rol mhi
- asl mlo
- rol mhi            ;*40
+ jsr mul40
  lda mlo
  sta SRCP
  lda mhi
@@ -781,18 +755,18 @@ savecolor
  sta SCRP
  lda #>COLBUF
  sta SCRP+1
+ ldy #0              ;advcol preserves Y; both loops keep it at 0
 sc_lp
- ldy #0
  lda (SRCP),y        ;even cell -> high nybble
  asl
  asl
  asl
  asl
- sta pktmp
+ sta TMP
  iny
  lda (SRCP),y        ;odd cell -> low nybble
  and #$0f
- ora pktmp
+ ora TMP
  dey
  sta (SCRP),y
  jsr advcol          ;SRCP += 2, SCRP += 1
@@ -808,8 +782,8 @@ restorecolor
  sta SCRP
  lda #>COLBUF
  sta SCRP+1
-rc_lp
  ldy #0
+rc_lp
  lda (SCRP),y        ;packed byte
  pha
  lsr                 ;high nybble -> even cell
@@ -821,6 +795,7 @@ rc_lp
  and #$0f            ;low nybble -> odd cell
  iny
  sta (SRCP),y
+ dey
  jsr advcol
  bne rc_lp
  rts
@@ -932,6 +907,8 @@ rsc_hdr
  jsr scrp_row
  jsr fillrule
  ;--- controls legend on rows 23-24 ---
+ lda #0
+ sta TMP            ;normal (non-reverse) text
  lda #<leg1
  sta SRCP
  lda #>leg1
@@ -940,7 +917,7 @@ rsc_hdr
  sta SCRP
  lda #>(SCREEN+(23*COLS))
  sta SCRP+1
- jsr drawleg
+ jsr drawtext
  lda #<leg2
  sta SRCP
  lda #>leg2
@@ -949,7 +926,7 @@ rsc_hdr
  sta SCRP
  lda #>(SCREEN+(24*COLS))
  sta SCRP+1
- jsr drawleg
+ jsr drawtext
  ;fall into draw_grid for the filter line + keyword grid
 
 ;==================== draw_grid ====================
@@ -965,18 +942,15 @@ draw_grid
  ;--- filter text on row 0 after the prompt, padded with spaces to NAMELEN ---
  ldx #0
 dg_fb
- cpx #NAMELEN
- beq dg_grid
- cpx filtlen
- bcc dg_fbchar
  lda #$20           ;past the filter -> blank (clears deleted chars)
- jmp dg_fbput
-dg_fbchar
+ cpx filtlen
+ bcs dg_fbput
  lda filtbuf,x
 dg_fbput
  sta SCREEN+8,x
  inx
- bne dg_fb          ;always (x < NAMELEN=19)
+ cpx #NAMELEN
+ bne dg_fb
 dg_grid
  ;--- scan index under SEI, drawing matching entries in place ---
  lda #0
@@ -985,7 +959,7 @@ dg_grid
 dg_lp
  lda rscnt
  beq dg_done
- jsr filtmatch      ;C=1 match; namebuf filled either way
+ jsr filtmatch      ;C=1 match (name compared in place at (SRCP)+IXNAME)
  bcc dg_skip
  ;--- match: logical row = numvis/NCOLS, column = numvis%NCOLS ---
  lda numvis
@@ -1002,26 +976,22 @@ dg_lp
  sbc scrolltop      ;rr = gr_row - scrolltop
  cmp #VISROWS
  bcs dg_nodraw      ;below the window
- jsr cellscrp       ;A=rr, gr_col set -> SCRP = cell address
- ;--- invert the selected entry ---
+ jsr cellscrp       ;A=rr, gr_col set -> SCRP = cell address - IXNAME
+ ;--- copy the name straight from the index entry, reversed if selected ---
+ ldx #$00
  lda numvis
  cmp selvis
- bne dg_write
- ldx #0
-dg_inv
- lda namebuf,x
- ora #$80
- sta namebuf,x
- inx
- cpx #NAMELEN
- bne dg_inv
-dg_write
- ldy #0
+ bne dg_mask
+ ldx #$80           ;reverse-video mask for the selected entry
+dg_mask
+ stx TMP
+ ldy #IXNAME        ;cellscrp biased SCRP by -IXNAME, so one Y indexes both
 dg_wrt
- lda namebuf,y
+ lda (SRCP),y
+ ora TMP
  sta (SCRP),y
  iny
- cpy #NAMELEN
+ cpy #IXNAME+NAMELEN
  bne dg_wrt
 dg_nodraw
  inc numvis
@@ -1057,33 +1027,43 @@ bt_lp
  lda gr_row
  sec
  sbc scrolltop      ;rr
- jsr cellscrp
- ldy #NAMELEN-1
+ jsr cellscrp       ;SCRP = cell address - IXNAME (write window is Y=IXNAME..)
+ ldy #IXNAME+NAMELEN-1
  lda #$20
 bt_wr
  sta (SCRP),y
  dey
- bpl bt_wr
+ cpy #IXNAME-1
+ bne bt_wr
  inc bp
  jmp bt_lp
 bt_done
  rts
 
 ;==================== cellscrp ====================
-; SCRP = screen address of a grid cell. In: A = rr (logical row - scrolltop),
+; SCRP = screen address of a grid cell MINUS IXNAME, so callers can index the
+; entry name at (SRCP),y and the screen at (SCRP),y with the same Y register
+; (Y = IXNAME..IXNAME+NAMELEN-1). In: A = rr (logical row - scrolltop),
 ; gr_col = column. Clobbers mlo/mhi/dtmp (via scrp_row).
 cellscrp
  clc
  adc #GRIDTOP       ;screen row = GRIDTOP + rr
  jsr scrp_row       ;SCRP = SCREEN + screenrow*40
- lda gr_col
- beq cs_done        ;column 0 -> no offset
+ ldy gr_col
+ beq cs_col0        ;column 0 -> no offset
  lda SCRP
  clc
  adc #COLW          ;column 1 -> + COLW
  sta SCRP
- bcc cs_done
+ bcc cs_col0
  inc SCRP+1
+cs_col0
+ lda SCRP           ;bias down by IXNAME (see above)
+ sec
+ sbc #IXNAME
+ sta SCRP
+ bcs cs_done
+ dec SCRP+1
 cs_done
  rts
 
@@ -1115,37 +1095,38 @@ ev_done
 ;==================== scrp_row ====================
 ; SCRP = SCREEN + A*40   (A = screen row 0..24). Clobbers mlo/mhi/dtmp.
 scrp_row
+ jsr mul40
+ lda mlo
+ sta SCRP
+ lda mhi
+ clc
+ adc #>SCREEN
+ sta SCRP+1
+ rts
+
+; mul40: mlo/mhi = A*40 = ((A*4 + A) * 8). Clobbers dtmp (lo byte).
+mul40
  sta mlo
+ sta dtmp
  lda #0
  sta mhi
  asl mlo
  rol mhi            ;*2
  asl mlo
  rol mhi            ;*4
- asl mlo
- rol mhi            ;*8
- lda mlo
- sta dtmp
- lda mhi
- sta dtmp+1         ;save row*8
- asl mlo
- rol mhi            ;*16
- asl mlo
- rol mhi            ;*32
  lda mlo
  clc
  adc dtmp
  sta mlo
- lda mhi
- adc dtmp+1
- sta mhi            ;*40 = *32 + *8
- lda mlo
- clc
- adc #<SCREEN
- sta SCRP
- lda mhi
- adc #>SCREEN
- sta SCRP+1
+ bcc m40_x8
+ inc mhi            ;*5
+m40_x8
+ asl mlo
+ rol mhi            ;*10
+ asl mlo
+ rol mhi            ;*20
+ asl mlo
+ rol mhi            ;*40
  rts
 
 ;==================== fillrule ====================
@@ -1159,77 +1140,51 @@ fr_lp
  bpl fr_lp
  rts
 
-; drawleg: copy a 0-terminated string at (SRCP) to (SCRP), converting each char
-; to a screen code. TMPx .text emits uppercase as shifted PETSCII ($c1-$da);
-; map those to letter screen codes ($01-$1a). Digits/colon/space already match
-; their screen codes, so pass them through. Used for the static controls legend.
-drawleg
+;==================== drawtext ====================
+; Draw the 0-terminated string at (SRCP) to the row at (SCRP), converting each
+; char to a screen code: TMPx .text emits uppercase as shifted PETSCII
+; ($c1-$da), mapped to letter screen codes ($01-$1a); digits/colon/space
+; already match their screen codes and pass through. Every char is OR'd with
+; the mask in TMP ($00 = normal for the controls legend, $80 = reverse video
+; for the doc-view status bar) and the row is padded to COLS with masked
+; spaces (a no-op on the legend rows, which are already blank).
+drawtext
  ldy #0
-dlg_lp
+dt_lp
  lda (SRCP),y
- beq dlg_done
+ beq dt_pad         ;end of string -> pad the rest of the row
  cmp #$c1
- bcc dlg_put
+ bcc dt_put
  cmp #$db
- bcs dlg_put
- sec
- sbc #$c0           ;PETSCII A-Z -> screen codes 1-26
-dlg_put
- sta (SCRP),y
- iny
- bne dlg_lp
-dlg_done
- rts
-
-;==================== drawstatus ====================
-; Draw a full-width reverse-video status bar: the 0-terminated legend at (SRCP),
-; converted to screen codes like drawleg and reverse-video'd, then padded to COLS
-; with reverse-space ($a0), at the row starting at (SCRP).
-drawstatus
- ldy #0
-ds_lp
- lda (SRCP),y
- beq ds_pad         ;end of string -> pad the rest of the row
- cmp #$c1
- bcc ds_put
- cmp #$db
- bcs ds_put
- sec
- sbc #$c0           ;PETSCII A-Z -> screen codes 1-26
-ds_put
- ora #$80           ;reverse video
+ bcs dt_put
+ sbc #$c0-1         ;C=0 from the bcs above, so this subtracts $c0:
+                    ;PETSCII A-Z -> screen codes 1-26
+dt_put
+ ora TMP
  sta (SCRP),y
  iny
  cpy #COLS
- bne ds_lp
+ bne dt_lp
  rts
-ds_pad
- lda #$a0           ;reverse-space
-ds_padl
+dt_pad
+ lda #$20
+ ora TMP            ;masked space ($20 normal / $a0 reverse)
+dt_pdl
  sta (SCRP),y
  iny
  cpy #COLS
- bne ds_padl
+ bne dt_pdl
  rts
 
 ;==================== filtmatch ====================
 ; in:  SRCP -> index entry; filtbuf/filtlen = active filter.
-; out: C=1 if display name is a substring match of filter; namebuf filled.
-; modifies: X, Y, namebuf, fmpos.
+; out: C=1 if the filter is a substring of the entry's display name, compared
+;      in place at (SRCP)+IXNAME (no copy -- draw_grid reads the name from the
+;      entry too, so nothing is buffered per entry).
+; modifies: A, X, Y, fmpos.
 filtmatch
- ;--- copy 10-byte name from entry offset IXNAME to namebuf ---
- ldy #IXNAME
- ldx #0
-fm_cpy
- lda (SRCP),y
- sta namebuf,x
- iny
- inx
- cpx #NAMELEN
- bne fm_cpy
- ;--- empty filter matches everything ---
  lda filtlen
- beq fm_yes
+ beq fm_yes         ;empty filter matches everything
  ;--- substring search: try each start position ---
  lda #0
  sta fmpos
@@ -1239,20 +1194,22 @@ fm_outer
  adc filtlen
  cmp #NAMELEN+1     ;fmpos+filtlen > NAMELEN -> exhausted
  bcs fm_no
- ldy fmpos
+ lda fmpos          ;C=0 from the cmp above
+ adc #IXNAME
+ tay                ;Y indexes the name inside the entry
  ldx #0
 fm_inner
  cpx filtlen
  beq fm_yes
- lda namebuf,y
+ lda (SRCP),y
  cmp filtbuf,x
  bne fm_miss
  iny
  inx
- bne fm_inner       ;X < 11 here, never 0 after inx within filtlen<=10
+ bne fm_inner       ;always (X <= filtlen <= NAMELEN)
 fm_miss
  inc fmpos
- bne fm_outer       ;fmpos < 11, always non-zero after inc
+ bne fm_outer       ;always (fmpos <= NAMELEN)
 fm_no
  clc
  rts
@@ -1276,12 +1233,7 @@ fs_lp
  cmp selvis
  bne fs_notsel
  ;--- found the target entry ---
- ldy #1
- lda (SRCP),y
- sta topline
- ldy #2
- lda (SRCP),y
- sta topline+1
+ jsr setstart
  jsr pageout
  lda #1
  sta mode
@@ -1294,6 +1246,16 @@ fs_skip
  bne fs_lp
 fs_done
  jmp pageout
+
+; setstart: topline = the entry's start line ((SRCP) bytes 1,2)
+setstart
+ ldy #1
+ lda (SRCP),y
+ sta topline
+ iny
+ lda (SRCP),y
+ sta topline+1
+ rts
 
 ;==================== topic navigation (F3/F5) ====================
 nexttopic
@@ -1314,19 +1276,19 @@ tn_not0
  ldy #1
  lda (SRCP),y
  sta mlo            ;start lo
- ldy #2
+ iny
  lda (SRCP),y
  sta mhi            ;start hi
  ;end = start + count + 1: the +1 absorbs the one blank separator line that
  ;sits between this topic and the next (it is in no topic's indexed range, so
  ;without this F3/F5 do nothing when topline rests on it - one line above a
  ;title). The next topic starts at start+count+1, so the ranges never overlap.
- ldy #3
+ iny
  lda (SRCP),y
  sec
  adc mlo
  sta dtmp           ;end lo
- ldy #4
+ iny
  lda (SRCP),y
  adc mhi
  sta dtmp+1         ;end hi
@@ -1386,12 +1348,7 @@ tn_go_next
  beq tn_exit
  jsr advsrc
 tn_setline
- ldy #1
- lda (SRCP),y
- sta topline
- ldy #2
- lda (SRCP),y
- sta topline+1
+ jsr setstart
 tn_exit
  jmp pageout
 tn_next
@@ -1443,7 +1400,6 @@ savvmc   .byte 0      ;saved VMCSB (charset + video matrix)
 savturbo .byte 0      ;saved Ultimate 64 turbo speed register ($d031)
 savd3    .byte 0      ;saved cursor column (PNTR $d3)
 savd6    .byte 0      ;saved cursor row (TBLX $d6)
-pktmp    .byte 0      ;color pack scratch (high nybble being assembled)
 mode     .byte 0      ;0=search page, 1=doc view
 filtbuf  .repeat NAMELEN,0 ;active filter (screen codes)
 filtlen  .byte 0
@@ -1461,7 +1417,6 @@ fscnt    .byte 0      ;visible entry counter for find_selected
 fmpos    .byte 0      ;outer position for filtmatch substring search
 bp       .byte 0      ;blank_tail position counter
 bp_end   .byte 0      ;blank_tail window-end position
-namebuf  .repeat NAMELEN,0 ;name buffer (screen codes)
 
 ; packed color-RAM snapshot: 1000 cells -> 500 bytes (see savecolor). Emitted as
 ; real image bytes so make_crt's PAGER_MAX check guards it from reaching SCRBUF

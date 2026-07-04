@@ -20,7 +20,6 @@
 ;
 ; Assembled for $033c (its install/run address). See docs-pager design.
 
-TOPICTOK = $02        ;topic for the pager (0 = start)
 R6510    = $01
 CART     = $de00
 QTSW     = $d4        ;editor quote-mode flag
@@ -51,28 +50,26 @@ tonormal
  jmp (REALGONE)       ;plain RESTORE -> original runstp (editor-mode reset / no-op)
 
 dodocs
- ;CTRL+RESTORE always opens docs. Clear any active editor mode first so the
- ;resumed editor isn't left stuck in a prior Quote/Insert/Rvs mode on exit.
+ ;CTRL+RESTORE always opens docs (the pager itself always opens at the first
+ ;topic). Clear any active editor mode first so the resumed editor isn't left
+ ;stuck in a prior Quote/Insert/Rvs mode on exit.
  lda #0
  sta QTSW             ;editor quote-mode flag
  sta INSRT            ;editor insert count
  sta RVS              ;editor reverse flag
- sta TOPICTOK         ;always open at the first topic
+ sta SRCZP            ;lo bytes of src/dst pointers
+ sta DSTZP
+ tay                  ;Y = 0 for the copy loop
  sei
  lda #$37
  sta R6510            ;BASIC+KERNAL+I/O in, cart visible at $8000
  lda #INDEX_BANK
  sta CART             ;page in the pager bank
- lda #$00
- sta SRCZP
  lda #$80
  sta SRCZP+1          ;src = $8000
- lda #$00
- sta DSTZP
  lda #$c0
  sta DSTZP+1          ;dst = $c000
  ldx #12              ;12 pages = 3K (must match PAGER_MAX in tools/make_crt.py)
- ldy #0
 copy
  lda (SRCZP),y
  sta (DSTZP),y
