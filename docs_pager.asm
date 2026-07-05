@@ -456,7 +456,17 @@ exit
  lda savhib
  cmp #$04
  beq exdone
- jsr CLRSCR
+ sei                ;mask the cursor-blink IRQ across the clear + cursor reset.
+                    ;On the Ultimate 64 the CIA/raster IRQ runs at turbo speed, so
+                    ;an unmasked blink reliably fires mid-exit: it draws a block at
+                    ;the old PNT and flips BLNON, then CLRSCR homes PNT leaving
+                    ;BLNON stale, so the next keypress stamps a stray char at the
+                    ;home cell. Held until the handler's closing RTI restores I.
+ jsr CLRSCR         ;fresh $0400 screen: rebuilds link table, homes cursor + PNT
+ lda #$20
+ sta GDCHAR         ;char under the freshly homed cursor is a space now
+ lda #$ff
+ sta BLNON          ;no cursor block shown -> the resumed IRQ draws a clean one
 exdone
  lda savturbo
  sta U64SPEED        ;restore the Ultimate 64 turbo speed bits

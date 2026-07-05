@@ -15,8 +15,14 @@ $0400 screen on a non-page-0 exit (rebuilding the link table + homing PNT); page
 A real CTRL+RESTORE exits via the kernal NMI tail ($fe72 -> RTI) back to the
 *interrupted* editor loop, NOT through READY -- so READY never re-inits PNT for
 us. To observe the exact state the pager leaves (before any READY re-init would
-mask it) this test returns the synthetic NMI frame into a JMP-self spin loop and
-reads PNT/HIBASE/VIC from the frozen machine.
+mask it) this test returns the synthetic NMI frame into a SEI + JMP-self spin
+loop (interrupts masked so no cursor-blink runs) and reads the frozen state.
+
+It also asserts the cursor-blink state the exit must leave -- GDCHAR ($ce) = a
+space and BLNON ($cf) = $ff (no block shown). The exit clears + resets these
+under SEI, because on the Ultimate 64 the blink IRQ runs at turbo speed and
+otherwise races the clear, leaving BLNON stale so the next keypress stamps a
+stray char at the homed cell (0,0).
 
 Observed on Ultimate 64 hardware; the cause is KERNAL editor state, so it
 reproduces identically in VICE.
@@ -37,13 +43,15 @@ import vice_docs_test as docs
 
 PORT = 6562
 STUB = docs.STUB_ADDR   # $0390 = 912
-SPIN = 0x02A7           # a JMP-self we return into, to freeze the pager-exit state
+SPIN = 0x02A7           # a SEI;JMP-self we return into, to freeze the pager-exit state
+SPIN_CODE = bytes([0x78, 0x4C, SPIN & 0xFF, SPIN >> 8])   # SEI ; JMP self
 
 
 def spin_stub(dodocs: int) -> bytes:
-    """docs.nmi_frame_stub, but the NMI return address is SPIN (a JMP-self), not
-    $a474/READY -- so after docs exit + RTI the CPU freezes and we read the exact
-    editor/VIC state the pager left, before READY could re-initialise PNT."""
+    """docs.nmi_frame_stub, but the NMI return address is SPIN (SEI;JMP-self), not
+    $a474/READY -- so after docs exit + RTI the CPU freezes with interrupts masked
+    and we read the exact editor/VIC state the pager left, before a blink IRQ or
+    READY could touch it."""
     lo, hi = dodocs & 0xFF, dodocs >> 8
     return bytes([
         0xA9, SPIN >> 8, 0x48,               # PCH
@@ -56,11 +64,13 @@ def spin_stub(dodocs: int) -> bytes:
 def zp(port: int) -> dict[str, int]:
     s = harness.connect_monitor(port, 20.0)
     hib = harness.mem_get(s, 0x0288, 0x0288)[0]           # HIBASE
-    z = harness.mem_get(s, 0x00D1, 0x00D6)                # PNT, PNTR, .., TBLX
+    z = harness.mem_get(s, 0x00CE, 0x00D6)                # GDCHAR,BLNON,..,PNT,..,TBLX
     vic = harness.mem_get(s, 0xD011, 0xD018)              # SCROLY..VMCSB
     dd00 = harness.mem_get(s, 0xDD00, 0xDD00)[0]
     s.close()
-    return {"hibase": hib, "pnt": z[0] | (z[1] << 8),
+    return {"hibase": hib,
+            "gdchar": z[0x00CE - 0xCE], "blnon": z[0x00CF - 0xCE],
+            "pnt": z[0x00D1 - 0xCE] | (z[0x00D2 - 0xCE] << 8),
             "scroly": vic[0], "vmcsb": vic[7], "ci2pra": dd00}
 
 
@@ -84,7 +94,7 @@ def main() -> int:
         # Trigger docs, returning into the spin loop so the pager-exit state is
         # frozen (no READY re-init).
         s = harness.connect_monitor(PORT, 20.0)
-        harness.mem_set(s, SPIN, bytes([0x4C, SPIN & 0xFF, SPIN >> 8]))  # JMP self
+        harness.mem_set(s, SPIN, SPIN_CODE)             # SEI ; JMP self
         harness.mem_set(s, STUB, spin_stub(dodocs))
         s.close()
         harness.keyboard_type_on_port(PORT, f"SYS{STUB}\r")
@@ -100,6 +110,10 @@ def main() -> int:
         # IRQ draws the cursor there (not off-screen at $c8xx).
         results["cursor_pnt_onscreen"] = 0x0400 <= after["pnt"] <= 0x07FF
         results["hibase_page0"] = after["hibase"] == 0x04
+        # ...and the cursor-blink state is clean: no block shown, space under it,
+        # so moving off (0,0) can't stamp a stray char.
+        results["cursor_no_block"] = after["blnon"] == 0xFF
+        results["cursor_gdchar_space"] = after["gdchar"] == 0x20
         # And the VIC is canonical text (the sibling fix), so $0400 is displayed.
         results["vmcsb_canonical"] = after["vmcsb"] == 0x15
         results["bank0"] = (after["ci2pra"] & 0x03) == 0x03
@@ -116,7 +130,8 @@ def main() -> int:
 
     print(f"  before: HIBASE=${before.get('hibase',0):02x} PNT=${before.get('pnt',0):04x}")
     print(f"  after : HIBASE=${after.get('hibase',0):02x} PNT=${after.get('pnt',0):04x} "
-          f"VMCSB=${after.get('vmcsb',0):02x}")
+          f"VMCSB=${after.get('vmcsb',0):02x} BLNON=${after.get('blnon',0):02x} "
+          f"GDCHAR=${after.get('gdchar',0):02x}")
     for k, v in results.items():
         print(f"  {'PASS' if v else 'FAIL'}  {k}")
     ok = all(results.values())
