@@ -15,7 +15,11 @@
 
 HANDLER_SRC = $9800     ;handler location in cart bank 3 (bank offset $1800)
 HANDLER_DST = $033c     ;cassette buffer (unused by MDBASIC)
-HANDLER_LEN = $a0       ;160 bytes copied (menu.asm $033c stub is ~145)
+HANDLER_LEN = $b8       ;184 bytes copied -- must stay >= menu.asm's assembled
+                        ;size (currently ~173) and < REALGONE-HANDLER_DST ($bc,
+                        ;so REALGONE's stashed address isn't overwritten).
+                        ;make_crt.py cross-checks this against the real handler
+                        ;size at build time.
 REALGONE    = $03f8     ;stash for the original execut address (lo,hi)
 HELP_BANK   = 3
 TRPTR       = $5c       ;zp pointer to troff's ldx operand (set by cold start)

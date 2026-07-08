@@ -9,10 +9,14 @@ buffer; the resulting program is checked by LISTing it and by comparing the raw
 program bytes ($0801..VARTAB) for the reject cases (a rejected R/M must leave the
 program byte-identical).
 
-Covered: default/ranged R with reference rewrite (incl. digit-count growth), a
-valid M that physically relocates the block + rewrites its GOSUB, the REPL staying
-open after a command, and the reject paths (overflow, order/collision, END<=START)
-each leaving the program untouched.
+Covered: default/ranged R with reference rewrite (incl. digit-count growth), R's
+explicit <dest> anchoring the new numbering away from <start>, a valid M that
+physically relocates the block + rewrites its GOSUB (with <start> below the first
+actual source line, so the block anchors on <dest> rather than on minsrc-mstart+
+dest), the REPL staying open after a command, the reject paths (overflow, order/
+collision, END<START) each leaving the program untouched, and that the tool
+snapshots the screen on entry and restores it (text + cursor position) on RUN/STOP
+exit rather than leaving the screen blank.
 
     tools/vice_renum_test.py
 """
@@ -119,6 +123,39 @@ def main() -> int:
             try: proc.wait(timeout=5)
             except Exception: proc.kill()
 
+    # ---- session 0b: the menu itself backs up the screen, clears it, and shows
+    # the prompt; dismissing (STOP) restores the pre-menu screen ----
+    port = next(ports)
+    proc = boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        type_lines(port, ['10 PRINT"MARKERTEXT"'])
+        s = harness.connect_monitor(port, 20.0)
+        before = harness.screen_text(s).upper()
+        s.close()
+        results["menu_marker_before"] = "MARKERTEXT" in before
+        s = harness.connect_monitor(port, 20.0)
+        harness.mem_set(s, dt.STUB_ADDR, dt.nmi_frame_stub(domenu)); s.close()
+        harness.keyboard_type_on_port(port, f"SYS{dt.STUB_ADDR}\r")
+        time.sleep(0.8)
+        s = harness.connect_monitor(port, 20.0)
+        during = harness.screen_text(s).upper()
+        s.close()
+        results["menu_clears_marker"] = ("MARKERTEXT" not in during
+                                         and "F1=DOCS" in during)
+        harness.keyboard_type_on_port(port, "\x03")   # STOP -> dismiss
+        time.sleep(0.8)
+        s = harness.connect_monitor(port, 20.0)
+        after = harness.screen_text(s).upper()
+        s.close()
+        results["menu_restores_marker"] = "MARKERTEXT" in after
+        results["menu_prompt_gone"] = "F1=DOCS" not in after
+        harness.quit_vice(harness.connect_monitor(port, 20.0))
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except Exception: proc.kill()
+
     # ---- session 1: renum success + reference rewrite (digit growth) + REPL ----
     port = next(ports)
     prog1 = ['10 PRINT"HI"', "20 GOTO 40", '30 PRINT"X"', "40 GOSUB 30", "50 END"]
@@ -155,7 +192,10 @@ def main() -> int:
 
     # ---- session 2: move with physical relocation + GOSUB rewrite ----
     # 10 GOSUB 200 / 30 END / 200 PRINT"SUB" / 210 RETURN
-    # M 200 210 15 -> block [200,210] renumbers to [15,25] and relocates before 30.
+    # M 150 210 15 -> <start> (150) is below the first actual line in the block
+    # (200); the block must still anchor so the FIRST source line (200) lands
+    # exactly on <dest> (15), not on minsrc-mstart+dest (65) -- regression check
+    # for the move-anchor bug. Block [200,210] -> [15,25], relocated before 30.
     port = next(ports)
     prog2 = ["10 GOSUB 200", "30 END", '200 PRINT"SUB"', "210 RETURN"]
     proc = boot(port, crt)
@@ -163,13 +203,16 @@ def main() -> int:
         s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
         type_lines(port, prog2)
         open_tool(port, dorenum)
-        cmd(port, "M 200 210 15")
+        cmd(port, "M 150 210 15")
         s = harness.connect_monitor(port, 20.0)
         results["move_ok"] = "OK" in harness.screen_text(s).upper()
         s.close()
         harness.keyboard_type_on_port(port, "\x03")
         time.sleep(0.6)
-        harness.keyboard_type_on_port(port, "LIST\r")
+        # RUN/STOP now restores the pre-tool screen (leftover typed-program text)
+        # instead of leaving it blank, so clear before LIST to get a screen whose
+        # text order reflects only the fresh listing.
+        harness.keyboard_type_on_port(port, "\x93LIST\r")
         time.sleep(1.2)
         s = harness.connect_monitor(port, 20.0)
         lst = harness.screen_text(s).upper()
@@ -202,7 +245,7 @@ def main() -> int:
         cmd(port, "M 30 20 500")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
-        results["reject_endstart_msg"] = "END<=START" in txt
+        results["reject_endstart_msg"] = "END<START" in txt
         results["reject_endstart_id"] = read_prog(s) == before
         s.close()
         # move collision: block [100,110] -> [15,25] interleaves kept line 20
@@ -302,6 +345,68 @@ def main() -> int:
         s.close()
         results["big_refs"] = ("2 GOSUB 9" in lst and "3 GOTO 5" in lst
                                and "6 GOTO 7" in lst)
+        harness.quit_vice(harness.connect_monitor(port, 20.0))
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except Exception: proc.kill()
+
+    # ---- session 6: screen is backed up on entry and restored on exit ----
+    # Open the tool (which draws its own header + REPL over the whole screen) and
+    # leave immediately with no command; the direct-mode text typed before entry
+    # must reappear, and the tool's own header must be gone (not just cleared).
+    port = next(ports)
+    proc = boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        type_lines(port, ['10 PRINT"MARKERTEXT"'])
+        s = harness.connect_monitor(port, 20.0)
+        before = harness.screen_text(s).upper()
+        s.close()
+        results["screen_marker_before"] = "MARKERTEXT" in before
+        open_tool(port, dorenum)
+        s = harness.connect_monitor(port, 20.0)
+        during = harness.screen_text(s).upper()
+        s.close()
+        results["screen_tool_covers"] = ("MARKERTEXT" not in during
+                                         and "RENUM" in during)
+        harness.keyboard_type_on_port(port, "\x03")   # RUN/STOP, no command run
+        time.sleep(0.8)
+        s = harness.connect_monitor(port, 20.0)
+        after = harness.screen_text(s).upper()
+        s.close()
+        results["screen_restored"] = "MARKERTEXT" in after
+        results["screen_tool_gone"] = "RENUM" not in after
+        harness.quit_vice(harness.connect_monitor(port, 20.0))
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except Exception: proc.kill()
+
+    # ---- session 7: R with explicit <dest> anchors the new numbering there ----
+    # 10 PRINT"A" / 20 PRINT"B" / 30 PRINT"C"
+    # R 5 10 30 1000 -> inc=5, source range [10,30], new numbering anchored at
+    # dest=1000 (not at start=10): 1000, 1005, 1010.
+    port = next(ports)
+    prog7 = ['10 PRINT"A"', '20 PRINT"B"', '30 PRINT"C"']
+    proc = boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        type_lines(port, prog7)
+        open_tool(port, dorenum)
+        cmd(port, "R 5 10 30 1000")
+        s = harness.connect_monitor(port, 20.0)
+        results["dest_ok"] = "OK" in harness.screen_text(s).upper()
+        s.close()
+        harness.keyboard_type_on_port(port, "\x03")
+        time.sleep(0.6)
+        harness.keyboard_type_on_port(port, "\x93LIST\r")
+        time.sleep(1.2)
+        s = harness.connect_monitor(port, 20.0)
+        lst = harness.screen_text(s).upper()
+        s.close()
+        results["dest_headers"] = ("1000 PRINT" in lst and "1005 PRINT" in lst
+                                   and "1010 PRINT" in lst)
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
         proc.terminate()

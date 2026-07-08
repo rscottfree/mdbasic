@@ -38,8 +38,13 @@ import vice_prg_test as harness
 
 PORT = 6554
 HANDLER_ADDR = 0x033c          # boot entry the cart NMI vector ($8002) points at
-STUB_ADDR = 0x03e0             # scratch above the $033c menu handler (boot copies
-                               # HANDLER_LEN=$a0 bytes, $033c-$03db) and below REALGONE
+STUB_ADDR = 0xc000             # scratch for the synthetic-NMI test stub. NOT in the
+                               # cassette buffer: menu.asm now uses nearly all of the
+                               # $033c-$03f7 budget (boot.asm's HANDLER_LEN), leaving
+                               # no safe gap there for a 15-byte stub. $c000 is free
+                               # instead -- it's where the chosen tool gets copied,
+                               # but only after the stub's own jmp has already handed
+                               # off control, so there's no overlap in time.
 
 # PETSCII box-grid corner/tee/cross screen codes (no vertical $5d, which is common).
 BOX_CODES = {0x70, 0x6E, 0x6D, 0x7D, 0x6B, 0x73, 0x72, 0x71, 0x5B}

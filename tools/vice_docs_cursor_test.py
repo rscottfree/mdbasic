@@ -42,7 +42,7 @@ import vice_prg_test as harness
 import vice_docs_test as docs
 
 PORT = 6562
-STUB = docs.STUB_ADDR   # $0390 = 912
+STUB = docs.STUB_ADDR   # $c000 = 49152 (see vice_docs_test.STUB_ADDR)
 SPIN = 0x02A7           # a SEI;JMP-self we return into, to freeze the pager-exit state
 SPIN_CODE = bytes([0x78, 0x4C, SPIN & 0xFF, SPIN >> 8])   # SEI ; JMP self
 

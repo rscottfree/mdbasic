@@ -3,9 +3,12 @@
 ; (3K) from RENUM_BANK $8000 and JSRed by the menu.asm $033c stub; RUN/STOP RTSs
 ; back to the stub, which does the NMI-tail RTI into the editor.
 ;
-;   R [<inc>] [<start>] [<end>]  -- partial renumber of the lines in the source
+;   R [<inc>] [<start>] [<end>] [<dest>]
+;                                -- partial renumber of the lines in the source
 ;                                   range, updating GOTO/GOSUB/ON/THEN/RUN/RESTORE/
-;                                   RESUME/ELSE/ERRL= references in place.
+;                                   RESUME/ELSE/ERRL= references in place. The new
+;                                   numbering starts at <dest> if given, else <start>
+;                                   (or <inc> if <start> is also omitted).
 ;   M <start> <end> <dest>       -- move+renumber a block, update its external
 ;                                   references, and relocate it to sorted order.
 ;   RUN/STOP                     -- leave the tool.
@@ -20,6 +23,10 @@
 ; sav7a/numchr/inc2d/dec2d/bufer/pntreq/clrflg) is ported verbatim from MDBASIC's
 ; own RENUM (mdbasic.asm renumer pass 2); only the old->new line-number mapping is
 ; ours (`mapnum` replaces `replac`). Assembled for $c000 (run location).
+;
+; Screen/cursor/blink state is saved exactly once, by menu_body.asm, before this
+; tool is ever copied to $c000 (see menu.asm's runmenu) -- this tool only
+; restores it on exit, via the shared SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN handoff.
 
 ; --- zero page / kernal / ROM ---
 R6510    = $01
@@ -32,13 +39,19 @@ STREND   = $31
 OLDLIN   = $3b
 TXTPTR   = $7a
 XSAV     = $97
+BLNSW    = $cc        ;cursor blink enable ($00=blinks, nonzero=disabled)
 GDCHAR   = $ce
 BLNON    = $cf
+BLNCT    = $cd        ;cursor blink countdown (20 = one full period)
+PNT      = $d1        ;pointer to the current screen line (lo/hi)
+PNTR     = $d3        ;cursor column on the current line
+TBLX     = $d6        ;cursor physical row
 CHRGET   = $0073
 CHRGOT   = $0079
 BAD      = $0100      ;FOUT string work area (new-number ASCII lands here)
 NMIVEC   = $0318
 HIBASE   = $0288
+SCREEN   = $0400
 SCROLY   = $d011
 VMCSB    = $d018
 CI2PRA   = $dd00
@@ -60,6 +73,27 @@ STRP     = $26        ;print-string pointer
 TOKEN_ERR   = $f2
 TOKEN_EQUAL = $b2
 
+SCRBUF   = $cc00      ;1K snapshot of screen RAM ($0400-$07ff), saved once by
+                      ;menu_body.asm before this tool is copied in, restored by
+                      ;this tool on exit -- same idiom/address as the docs
+                      ;pager's SCRBUF. Free scratch above the $c000 tool image
+                      ;and below I/O; outside the copied image so it costs no
+                      ;cart budget.
+
+;--- shared CTRL+RESTORE-menu screen/cursor/blink handoff (see menu_body.asm) ---
+;menu_body.asm always runs before this tool (either its full F1/F3/STOP UI, via
+;the real CTRL+RESTORE path, or its quick save-only path, via menu.asm's dorenum
+;test-bypass entry) and populates these before copying this tool over $c000, so
+;this tool never does its own entry-side save -- only the matching exit-side
+;restore. Zero page: menu.asm's copyrun scratch ($02-$05,$fb-$fe) is transient
+;and expires before this tool runs; these addresses also avoid this tool's own
+;persistent zero page (COUNT $0b, LINNUM $14, TXTTAB $2b, etc. below).
+SAVD3    = $06        ;saved PNTR (cursor column)
+SAVD6    = $07        ;saved TBLX (cursor row)
+SAVPNT   = $08        ;saved PNT lo($08)/hi($09)
+SAVHIB   = $0a        ;saved HIBASE (screen page at CTRL+RESTORE time)
+SAVBLN   = $0d        ;saved BLNSW (blink-enable state at CTRL+RESTORE time)
+
 *=$c000
 
 ;==================== entry ====================
@@ -68,6 +102,12 @@ start
  sta sav01
  lda #$37
  sta R6510            ;BASIC+KERNAL+I/O in (ROM callable, program text in RAM)
+ lda #1
+ sta BLNSW            ;disable cursor blink for the session -- the REPL has no
+                      ;screen-editor cursor to move, so blinking one would be
+                      ;misleading (input is GETIN+CHROUT, not the line editor).
+                      ;The true original blink-enable state is already saved in
+                      ;SAVBLN by menu_body.asm.
  lda NMIVEC
  sta savnmi
  lda NMIVEC+1
@@ -92,17 +132,42 @@ repl
  jmp repl
 
 ;==================== exit ====================
+;If we came from the $0400 text screen (savhib = $04), the snapshot taken at
+;entry is the real pre-tool screen: put it back verbatim (no CLRSCR, so the
+;editor's line-link table stays consistent with the restored PNT/cursor).
+;If we came from a SCREEN 1-5 page (savhib != $04), that page's content was
+;never saved (SCRBUF only holds $0400) and its line-link table + PNT still
+;point at it, so just clear to a fresh $0400 screen instead -- identical to
+;the docs pager's SCREEN-1-5 exit handling.
 texit
  lda savnmi
  sta NMIVEC
  lda savnmi+1
  sta NMIVEC+1
+ lda SAVHIB
+ cmp #$04
+ bne tblank
+ jsr forcetext
+ jsr restorescreen    ;put the saved screen RAM + cursor position back
+ lda SAVBLN
+ sta BLNSW            ;resume the prior blink-enable state
+ lda #$ff
+ sta BLNON            ;char-shown phase: the resumed IRQ draws a fresh cursor
+                      ;block, leaving no stale block artifact
+ lda #1
+ sta BLNCT            ;blink almost immediately
+ lda sav01
+ sta R6510
+ rts                  ;-> menu.asm stub does the NMI-tail RTI
+tblank
  jsr forcetext
  sei                  ;mask the blink IRQ across the clear + cursor reset (U64 race,
                       ;same care as the docs pager's SCREEN-1-5 exit)
  jsr CLRSCR
  lda #$20
  sta GDCHAR
+ lda SAVBLN
+ sta BLNSW            ;resume the prior blink-enable state
  lda #$ff
  sta BLNON
  lda sav01
@@ -125,6 +190,34 @@ forcetext
  sta HIBASE
  rts
 
+;==================== screen restore ====================
+;Restores the snapshot menu_body.asm took before this tool was copied in (see
+;the SAVD3/SAVD6/SAVPNT handoff equates above). This tool calls CLRSCR itself
+;(to draw its own REPL screen), which homes PNT/PNTR/TBLX -- so PNT must be
+;restored here too, not just PNTR/TBLX like the docs pager.
+restorescreen
+ ldx #0
+rs_cp
+ lda SCRBUF,x
+ sta SCREEN,x
+ lda SCRBUF+$100,x
+ sta SCREEN+$100,x
+ lda SCRBUF+$200,x
+ sta SCREEN+$200,x
+ lda SCRBUF+$300,x
+ sta SCREEN+$300,x
+ inx
+ bne rs_cp
+ lda SAVD3
+ sta PNTR
+ lda SAVD6
+ sta TBLX
+ lda SAVPNT
+ sta PNT
+ lda SAVPNT+1
+ sta PNT+1
+ rts
+
 ;==================== line input ====================
 ;read a line into inbuf (null-terminated). C=1 on RUN/STOP (leave the tool),
 ;C=0 on RETURN. X returns the length.
@@ -142,8 +235,15 @@ rl_lp
  beq rl_stop
  cmp #$14             ;DEL
  beq rl_del
- cmp #$20             ;ignore other control codes
+ cmp #$20             ;ignore other control codes ($00-$1f)
  bcc rl_lp
+ cmp #$80             ;$20-$7f are printable -- take them
+ bcc rl_ok
+ cmp #$a0
+ bcc rl_lp            ;$80-$9f: shifted control codes (cursor keys, RVS,
+                      ;colour keys, f-keys) -- ignore so cursor keys can't
+                      ;move the (invisible) cursor around the screen
+rl_ok
  ldx bufi
  cpx #38
  bcs rl_lp            ;buffer full
@@ -238,6 +338,12 @@ er2
  sta end16
  lda numbuf+1
  sta end16+1
+ jsr getnum
+ bcc erun             ;no dest -> base stays start (or inc, per above)
+ lda numbuf           ;dest given -> override base (new numbering starts here)
+ sta base16
+ lda numbuf+1
+ sta base16+1
 erun
  jmp do_renum
 
@@ -557,7 +663,7 @@ hr_x
 
 ;==================== MOVE ====================
 do_move
- ;require end > start
+ ;require end >= start (a single line is a valid move)
  lda mend+1
  cmp mstart+1
  bcc dm_bad
@@ -565,7 +671,6 @@ do_move
  lda mend
  cmp mstart
  bcc dm_bad
- beq dm_bad
 dm_ok1
  jsr val_move
  lda resultcode
@@ -581,7 +686,7 @@ dm_ok1
 dm_x
  rts
 dm_bad
- lda #5               ;END<=START
+ lda #5               ;END<START
  sta resultcode
  rts
 
@@ -623,27 +728,18 @@ vm_endw
  sta resultcode
  rts
 vm_have
- ;newmin = minsrc - mstart + mdest ; newmax = maxsrc - mstart + mdest
- sec
- lda minsrc
- sbc mstart
+ ;newmin = mdest (first source line lands exactly on dest);
+ ;newmax = maxsrc - minsrc + mdest
+ lda mdest
  sta newmin
- lda minsrc+1
- sbc mstart+1
- sta newmin+1
- clc
- lda newmin
- adc mdest
- sta newmin
- lda newmin+1
- adc mdest+1
+ lda mdest+1
  sta newmin+1
  sec
  lda maxsrc
- sbc mstart
+ sbc minsrc
  sta newmax
  lda maxsrc+1
- sbc mstart+1
+ sbc minsrc+1
  sta newmax+1
  clc
  lda newmax
@@ -683,7 +779,8 @@ vm_coll
  sta resultcode
  rts
 
-;hdr_move: header += (mdest - mstart) for each source line.
+;hdr_move: header = curnum - minsrc + mdest for each source line (so the first
+;source line, curnum=minsrc, lands exactly on mdest).
 hdr_move
  jsr set_mrange
  jsr lp_first
@@ -694,10 +791,10 @@ hm_lp
  bcc hm_next
  sec
  lda curnum
- sbc mstart
+ sbc minsrc
  sta t16
  lda curnum+1
- sbc mstart+1
+ sbc minsrc+1
  sta t16+1
  clc
  lda t16
@@ -950,12 +1047,12 @@ mn_move
  jsr set_mrange
  jsr in_range
  bcc mn_keep          ;ref outside the moved block -> unchanged
- sec                  ;new = LINNUM - mstart + mdest
+ sec                  ;new = LINNUM - minsrc + mdest
  lda LINNUM
- sbc mstart
+ sbc minsrc
  sta t16
  lda LINNUM+1
- sbc mstart+1
+ sbc minsrc+1
  sta t16+1
  clc
  lda t16
@@ -1322,7 +1419,7 @@ gotok
 hdrtxt
  .text "mdbasic renum / move"
  .byte $0d
- .text "r [inc] [start] [end]"
+ .text "r [inc] [start] [end] [dest]"
  .byte $0d
  .text "m start end dest"
  .byte $0d
@@ -1333,7 +1430,7 @@ sSYN       .null "?syntax"
 sRANGE     .null "?>63999"
 sCOLL      .null "?collision"
 sNONE      .null "no lines"
-sENDST     .null "?end<=start"
+sENDST     .null "?end<start"
 restab
  .word sOK, sSYN, sRANGE, sCOLL, sNONE, sENDST
 

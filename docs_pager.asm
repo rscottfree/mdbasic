@@ -60,10 +60,25 @@ COLRAM   = $d800
 CART     = $de00
 GETIN    = $ffe4
 CLRSCR   = $e544      ;kernal clear screen
-SCRBUF   = $cc00      ;1K snapshot of screen RAM ($0400-$07ff), saved on entry and
-                      ;restored on exit. Free scratch above the $c000 pager image
-                      ;and below I/O; outside the copied image so it costs no
-                      ;cart/PAGER_MAX budget.
+SCRBUF   = $cc00      ;1K snapshot of screen RAM ($0400-$07ff), saved once by
+                      ;menu_body.asm before this pager is copied in, restored by
+                      ;this pager on exit. Free scratch above the $c000 pager
+                      ;image and below I/O; outside the copied image so it costs
+                      ;no cart/PAGER_MAX budget.
+
+;--- shared CTRL+RESTORE-menu screen/cursor/blink handoff (see menu_body.asm) ---
+;menu_body.asm always runs before this pager (either its full F1/F3/STOP UI, via
+;the real CTRL+RESTORE path, or its quick save-only path, via menu.asm's dodocs
+;test-bypass entry) and populates these before copying this pager over $c000, so
+;this pager never does its own entry-side save -- only the matching exit-side
+;restore. Zero page: menu.asm's copyrun scratch ($02-$05,$fb-$fe) is transient
+;and expires before this pager runs; these addresses also avoid this pager's own
+;persistent zero page (TMP $02, SRCP $fb, SCRP $fd above).
+SAVD3    = $06        ;saved PNTR (cursor column)
+SAVD6    = $07        ;saved TBLX (cursor row)
+SAVPNT   = $08        ;saved PNT lo($08)/hi($09)
+SAVHIB   = $0a        ;saved HIBASE (screen page at CTRL+RESTORE time)
+SAVBLN   = $0d        ;saved BLNSW (blink-enable state at CTRL+RESTORE time)
 
 ; index layout in bank 3 at $8c00 (3K reserve $8c00-$97ff; handler at $9800).
 ; sits just above the pager code copied to $c000, below the RESTORE handler.
@@ -80,10 +95,10 @@ entry
  sta sav01
  lda #$37            ;BASIC+KERNAL+I/O in, LORAM=1 so cart shows at $8000
  sta R6510
- lda BLNSW
- sta savbln
  lda #1
- sta BLNSW           ;disable cursor blink for the session
+ sta BLNSW           ;disable cursor blink for the session -- the true original
+                     ;blink-enable state is already saved in SAVBLN by
+                     ;menu_body.asm
  lda NMIVEC
  sta savnmi
  lda NMIVEC+1
@@ -113,8 +128,6 @@ entry
  sta savbg
  lda COLOR
  sta savfg
- lda HIBASE          ;remember whether we came from the $0400 text screen (page 0)
- sta savhib          ;or a SCREEN 1-5 page, so exit can clean up the editor state
  lda U64SPEED        ;Ultimate 64: save the current turbo speed bits, then run flat
  sta savturbo        ;out (harmless on stock C64/VICE - $d031 reads $ff, drops writes)
  ora #$0f            ;speed index 15 = max turbo (48/64 MHz); badline bit 7 preserved
@@ -125,7 +138,6 @@ entry
  sta SPENA           ;all sprites off
  lda #14
  sta COLOR           ;light blue foreground
- jsr savescreen      ;snapshot screen RAM + cursor pos so exit can restore them
  jsr savecolor       ;snapshot color RAM (packed 2:1) before fillcolor overwrites it
  jsr forcetext       ;standard text screen at $0400 (in case graphics was on)
  jsr fillcolor
@@ -417,10 +429,9 @@ exit
  sta KEYLOG+1
  lda #$80
  sta CART            ;ensure cart paged out
- jsr restorescreen   ;put the saved screen RAM + cursor position back (no CLRSCR,
-                     ;so the editor's line pointer/cursor state is undisturbed)
+ jsr restorescreen   ;put the saved screen RAM + cursor position back
  jsr restorecolor    ;unpack the saved color RAM back over fillcolor's solid fill
- lda savbln
+ lda SAVBLN
  sta BLNSW           ;resume the prior blink-enable state
  lda #$ff
  sta BLNON           ;char-shown phase: the resumed kernal IRQ draws a fresh
@@ -453,7 +464,7 @@ exit
  ;cursor won't reappear until a key is pressed. Clear to a fresh $0400 screen:
  ;that rebuilds the link table, homes the cursor, and fixes PNT. Page 0
  ;(savhib = $04) keeps its restored screen and cursor untouched.
- lda savhib
+ lda SAVHIB
  cmp #$04
  beq exdone
  sei                ;mask the cursor-blink IRQ across the clear + cursor reset.
@@ -720,40 +731,12 @@ fc1
  bne fc1
  rts
 
-;==================== screen snapshot / restore ====================
-; savescreen: stash screen RAM ($0400-$07ff) into SCRBUF and remember the cursor
-; position, so exit can put the user's screen back. The cursor is de-blinked
-; first: if a cursor block is currently on screen (BLNON=$00), the true char
-; under it (GDCHAR) is written back to the cursor cell so the snapshot doesn't
-; capture the inverted block as a stale artifact.
-savescreen
- lda BLNON
- bne ss_pos          ;char shown (no block) -> cell already holds the real char
- ldy PNTR            ;block on screen -> restore the true char to the cursor cell
- lda GDCHAR
- sta (PNT),y         ;cell = (current line)+column
-ss_pos
- lda PNTR
- sta savd3
- lda TBLX
- sta savd6
- ldx #0
-ss_cp
- lda SCREEN,x
- sta SCRBUF,x
- lda SCREEN+$100,x
- sta SCRBUF+$100,x
- lda SCREEN+$200,x
- sta SCRBUF+$200,x
- lda SCREEN+$300,x
- sta SCRBUF+$300,x
- inx
- bne ss_cp
- rts
-
-; restorescreen: copy the saved screen RAM back to $0400 and restore the cursor
-; row/column. PNT (line pointer) was never disturbed by the pager, so it still
-; matches the restored row/column.
+;==================== screen restore ====================
+; restorescreen: copy the screen RAM menu_body.asm saved (before this pager was
+; ever copied in) back to $0400, and restore the cursor row/column/line-pointer.
+; PNT is never disturbed by the pager itself, but menu_body.asm's CLRSCR (in its
+; full-UI path) can home it upstream before this pager runs, so PNT must be put
+; back here too, not just PNTR/TBLX.
 restorescreen
  ldx #0
 rs_cp
@@ -767,10 +750,14 @@ rs_cp
  sta SCREEN+$300,x
  inx
  bne rs_cp
- lda savd3
+ lda SAVD3
  sta PNTR
- lda savd6
+ lda SAVD6
  sta TBLX
+ lda SAVPNT
+ sta PNT
+ lda SAVPNT+1
+ sta PNT+1
  rts
 
 ;==================== color snapshot / restore ====================
@@ -1423,16 +1410,12 @@ mlo      .byte 0
 mhi      .byte 0
 dtmp     .word 0
 sav01    .byte 0
-savbln   .byte 0
 savnmi   .word 0
 savkey   .word 0      ;saved KEYLOG vector (MDBASIC's keychk)
 savbdr   .byte 0      ;saved border color
 savbg    .byte 0      ;saved background color
 savfg    .byte 0      ;saved foreground color
-savhib   .byte 0      ;saved HIBASE ($0288): screen page at docs entry ($04 = page 0)
 savturbo .byte 0      ;saved Ultimate 64 turbo speed register ($d031)
-savd3    .byte 0      ;saved cursor column (PNTR $d3)
-savd6    .byte 0      ;saved cursor row (TBLX $d6)
 mode     .byte 0      ;0=search page, 1=doc view
 filtbuf  .repeat NAMELEN,0 ;active filter (screen codes)
 filtlen  .byte 0

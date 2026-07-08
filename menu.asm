@@ -25,6 +25,15 @@
 ; chosen tool (also at $c000, over the now-defunct menu-body). Each tool RTSs back
 ; here and this stub does the single NMI-tail RTI. See renum-move-tool-plan.
 ;
+; menu_body.asm is the ONLY place that snapshots screen RAM + cursor + blink
+; state (into SCRBUF + the SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN zero-page handoff) --
+; the docs pager and renum tool no longer duplicate that save; they only restore
+; from the same handoff at their own exit. `runmenu` always runs menu_body before
+; any tool, in one of two modes selected by SAVEONLY: the real CTRL+RESTORE path
+; (domenu) wants the full F1/F3/STOP UI; the dodocs/dorenum test-bypass entries
+; (which skip the UI) still need the save to happen, so they set SAVEONLY=1 and
+; menu_body just snapshots and returns immediately.
+;
 ; make_crt.py patches `renumbank` (fixed offset 3, right after the opening JMP)
 ; with the actual RENUM_BANK number, which varies with the doc-data bank count.
 
@@ -43,6 +52,10 @@ CPPAGES  = $02        ;copyrun page counter
 CPSRC    = $03        ;copyrun source page hi
 CPDST    = $04        ;copyrun dest page hi
 SAV01    = $05        ;saved $01
+SAVEONLY = $0e        ;shared flag read by menu_body.asm's `start`: 0 = show the
+                      ;full F1/F3/STOP UI (domenu); nonzero = skip the UI and
+                      ;just save screen/cursor/blink state, then return (dodocs/
+                      ;dorenum). Also safe during this NMI -- see SRCZP above.
 
 *=$033c
 
@@ -58,23 +71,32 @@ start
 tonormal
  jmp (REALGONE)       ;plain RESTORE -> original runstp (editor-mode reset / no-op)
 
-;dodocs: launch the docs pager directly, bypassing the menu-body. This is the
-;exact code the F1 menu choice runs; tools/vice_docs_test.py SYSes here (past the
-;CTRL/STOP gate) to exercise the pager without driving the menu.
+;dodocs: launch the docs pager directly, bypassing the menu-body's F1/F3/STOP UI
+;(but still running menu_body's quick save-only path first, via SAVEONLY, so the
+;pager has a screen/cursor/blink snapshot to restore from at its own exit). This
+;is what the F1 menu choice ultimately reaches too; tools/vice_docs_test.py SYSes
+;here (past the CTRL/STOP gate) to exercise the pager without driving the menu.
 dodocs
  lda R6510
  sta SAV01
  lda #$37
  sta R6510
+ lda #1
+ sta SAVEONLY
+ jsr runmenu
  jmp lpager
 
-;dorenum: launch the renum tool directly (same as the F3 menu choice); used by
-;tools/vice_renum_test.py to reach the tool without driving the menu-body.
+;dorenum: launch the renum tool directly (same as dodocs, but for the F3/lrenum
+;path); used by tools/vice_renum_test.py to reach the tool without driving the
+;menu-body's UI.
 dorenum
  lda R6510
  sta SAV01
  lda #$37
  sta R6510
+ lda #1
+ sta SAVEONLY
+ jsr runmenu
  jmp lrenum
 
 domenu
@@ -82,14 +104,9 @@ domenu
  sta SAV01
  lda #$37
  sta R6510            ;BASIC+KERNAL+I/O in, cart visible at $8000
- ;run the menu-body UI: RENUM_BANK $8c00 -> $c000, returns X = choice (0/1/2)
- lda #$8c
- sta CPSRC
- lda #$c0
- sta CPDST
- lda renumbank
- ldx #2               ;2 pages is ample for the menu-body UI
- jsr copyrun
+ lda #0
+ sta SAVEONLY         ;full F1/F3/STOP UI this time (not the quick save-only path)
+ jsr runmenu          ;X = choice (0/1/2)
  cpx #1
  beq lpager
  cpx #2
@@ -113,6 +130,18 @@ fin
  lda SAV01
  sta R6510
  jmp NMIRTI           ;finish the NMI -> RTI resumes the editor with its screen intact
+
+;runmenu: copy RENUM_BANK's menu-body to $c000 and run it (per SAVEONLY, either
+;the full UI, returning the F1/F3/STOP choice in X, or the quick save-only path,
+;whose X is undefined -- callers that set SAVEONLY=1 ignore it).
+runmenu
+ lda #$8c
+ sta CPSRC
+ lda #$c0
+ sta CPDST
+ lda renumbank
+ ldx #2               ;2 pages is ample for the menu-body UI
+ jmp copyrun          ;copyrun's JMP-in / RTS-out makes this a tail call
 
 ;copyrun: A = cart bank, X = page count, CPSRC/CPDST = source/dest page hi.
 ;Pages the bank in, copies X*256 bytes from CPSRC:00 to CPDST:00, pages the cart

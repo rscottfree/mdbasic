@@ -58,6 +58,10 @@ DATA_BANK0 = NUM_BANKS + 1   # banks 4+: doc line stream
 PAGER_MAX = 0x0c00           # menu.asm copies 12 pages (3KB) to $c000 per tool
 INDEX_OFF = 0x0c00           # topic index sits at bank 3 $8c00 (3K reserve to $97ff)
 HANDLER_OFF = 0x1800         # RESTORE handler sits at bank 3 $9800 (boot.asm reads it)
+HANDLER_LEN = 0xb8           # boot.asm HANDLER_LEN: fixed byte count boot.asm copies
+                             # from bank 3 $9800 to $033c -- must stay in sync with
+                             # boot.asm's own constant, or the copy silently truncates
+                             # menu.asm's tail at boot/cart-install time
 DOCSFLAG_OFF = 9             # boot.asm `docsflag` word, at stub $8009
 RENUMBANK_OFF = 3            # menu.asm `renumbank` byte, at $033f (offset 3 past its JMP)
 MENU_OFF = 0x0c00            # menu-body UI sits at RENUM_BANK $8c00 (renum tool is $8000)
@@ -103,6 +107,11 @@ def doc_banks(pager: bytes, index: bytes, data: bytes,
         raise ValueError(f"index {len(index)} bytes exceeds reserve")
     if len(handler) > BANK_SIZE - HANDLER_OFF:
         raise ValueError(f"handler {len(handler)} bytes exceeds reserve")
+    if len(handler) > HANDLER_LEN:
+        raise ValueError(f"handler {len(handler)} bytes exceeds boot.asm's "
+                          f"HANDLER_LEN ({HANDLER_LEN}) -- bump HANDLER_LEN in "
+                          f"boot.asm (and here) to match, or the boot copy will "
+                          f"silently truncate menu.asm's tail")
     if len(data) % BANK_SIZE:
         raise ValueError(f"doc data {len(data)} not a multiple of {BANK_SIZE}")
     data_banks = [data[i:i + BANK_SIZE] for i in range(0, len(data), BANK_SIZE)]
