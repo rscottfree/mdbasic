@@ -78,14 +78,20 @@ c1541 "$DISK81" \
 DOCS_ARGS=""
 if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     PAGER="$OUTDIR/docs_pager.bin"
-    HANDLER="$OUTDIR/docs_help.bin"
+    HANDLER="$OUTDIR/menu.bin"
+    MENUBODY="$OUTDIR/menu_body.bin"
+    RENUM="$OUTDIR/renum_tool.bin"
     tmpx -i "$ROOT/docs_pager.asm" -o "$OUTDIR/docs_pager.prg" >/dev/null
     tail -c +3 "$OUTDIR/docs_pager.prg" > "$PAGER"
-    tmpx -i "$ROOT/docs_help.asm" -o "$OUTDIR/docs_help.prg" >/dev/null
-    tail -c +3 "$OUTDIR/docs_help.prg" > "$HANDLER"
+    tmpx -i "$ROOT/menu.asm" -o "$OUTDIR/menu.prg" >/dev/null
+    tail -c +3 "$OUTDIR/menu.prg" > "$HANDLER"
+    tmpx -i "$ROOT/menu_body.asm" -o "$OUTDIR/menu_body.prg" >/dev/null
+    tail -c +3 "$OUTDIR/menu_body.prg" > "$MENUBODY"
+    tmpx -i "$ROOT/renum_tool.asm" -o "$OUTDIR/renum_tool.prg" >/dev/null
+    tail -c +3 "$OUTDIR/renum_tool.prg" > "$RENUM"
     python3 "$ROOT/tools/build_docs.py" --pack "$OUTDIR/docs.bin" >/dev/null
-    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER"
-    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + RESTORE handler $(wc -c <"$HANDLER") B"
+    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --menu $MENUBODY"
+    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + renum tool $(wc -c <"$RENUM") B"
 else
     echo "Skipping docs: mdbasic.pdf or pdftotext not available"
 fi

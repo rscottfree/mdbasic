@@ -38,7 +38,8 @@ import vice_prg_test as harness
 
 PORT = 6554
 HANDLER_ADDR = 0x033c          # boot entry the cart NMI vector ($8002) points at
-STUB_ADDR = 0x0390             # scratch above the $033c handler ($033c-$038d used)
+STUB_ADDR = 0x03e0             # scratch above the $033c menu handler (boot copies
+                               # HANDLER_LEN=$a0 bytes, $033c-$03db) and below REALGONE
 
 # PETSCII box-grid corner/tee/cross screen codes (no vertical $5d, which is common).
 BOX_CODES = {0x70, 0x6E, 0x6D, 0x7D, 0x6B, 0x73, 0x72, 0x71, 0x5B}
@@ -121,13 +122,15 @@ def build_cart() -> tuple[Path, int]:
     subprocess.run(["tmpx", "-i", str(ROOT / "mdbasic.asm"),
                     "-o", str(ROOT / "mdbasic.prg")], check=True, capture_output=True)
     stub = asm("boot.asm", "/tmp/boot.prg")
-    handler = asm("docs_help.asm", "/tmp/help.prg", lst="/tmp/help.lst")
-    dodocs = label_addr("/tmp/help.lst", "dodocs")
+    handler = asm("menu.asm", "/tmp/menu.prg", lst="/tmp/menu.lst")
+    dodocs = label_addr("/tmp/menu.lst", "dodocs")
     pager = asm("docs_pager.asm", "/tmp/pager.prg")
+    menu = asm("menu_body.asm", "/tmp/menubody.prg")
+    renum = asm("renum_tool.asm", "/tmp/renum.prg")
     build_docs.pack(ROOT / "build/docs.bin")
     idx = (ROOT / "build/docs.idx").read_bytes()
     dat = (ROOT / "build/docs.dat").read_bytes()
-    banks = make_crt.doc_banks(pager, idx, dat, handler)
+    banks = make_crt.doc_banks(pager, idx, dat, handler, renum=renum, menu=menu)
     image = make_crt.image_from_prg((ROOT / "mdbasic.prg").read_bytes())
     crt = make_crt.build_crt(image, name="MDDOCS", stub=stub, extra_banks=banks)
     out = Path("/tmp/mddocs.crt")

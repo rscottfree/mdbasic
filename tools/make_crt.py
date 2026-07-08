@@ -55,10 +55,12 @@ BANK_SIZE = 0x2000           # 8K Magic Desk bank
 NUM_BANKS = 3                # 24K of ROM holds stub + 16K image + padding
 INDEX_BANK = NUM_BANKS       # bank 3: docs pager code + topic index + handler
 DATA_BANK0 = NUM_BANKS + 1   # banks 4+: doc line stream
-PAGER_MAX = 0x0c00           # docs_help.asm copies 12 pages (3KB) to $c000
+PAGER_MAX = 0x0c00           # menu.asm copies 12 pages (3KB) to $c000 per tool
 INDEX_OFF = 0x0c00           # topic index sits at bank 3 $8c00 (3K reserve to $97ff)
 HANDLER_OFF = 0x1800         # RESTORE handler sits at bank 3 $9800 (boot.asm reads it)
 DOCSFLAG_OFF = 9             # boot.asm `docsflag` word, at stub $8009
+RENUMBANK_OFF = 3            # menu.asm `renumbank` byte, at $033f (offset 3 past its JMP)
+MENU_OFF = 0x0c00            # menu-body UI sits at RENUM_BANK $8c00 (renum tool is $8000)
 STUB_PATH = Path(__file__).with_name("cart_boot.bin")
 
 
@@ -90,8 +92,11 @@ def _cart_header(name: str) -> bytearray:
 
 
 def doc_banks(pager: bytes, index: bytes, data: bytes,
-              handler: bytes = b"") -> list[bytes]:
-    """Compose the docs-pager banks (bank 3 = pager+index+handler, banks 4+ = data)."""
+              handler: bytes = b"", renum: bytes = b"", menu: bytes = b"") -> list[bytes]:
+    """Compose the cart banks: bank 3 = pager+index+handler, banks 4+ = doc data,
+    and (if renum/menu are given) a final RENUM_BANK = renum tool ($8000) + menu-body
+    ($8c00). The RENUM_BANK number depends on the doc-data bank count, so its value
+    is patched into the handler's `renumbank` byte here (menu.asm offset 3)."""
     if len(pager) > PAGER_MAX:
         raise ValueError(f"pager {len(pager)} bytes exceeds {PAGER_MAX}")
     if len(index) > HANDLER_OFF - INDEX_OFF:
@@ -100,12 +105,32 @@ def doc_banks(pager: bytes, index: bytes, data: bytes,
         raise ValueError(f"handler {len(handler)} bytes exceeds reserve")
     if len(data) % BANK_SIZE:
         raise ValueError(f"doc data {len(data)} not a multiple of {BANK_SIZE}")
+    data_banks = [data[i:i + BANK_SIZE] for i in range(0, len(data), BANK_SIZE)]
+
+    renum_bank = None
+    if renum or menu:
+        if len(renum) > MENU_OFF:
+            raise ValueError(f"renum tool {len(renum)} bytes exceeds {MENU_OFF}")
+        if len(menu) > BANK_SIZE - MENU_OFF:
+            raise ValueError(f"menu-body {len(menu)} bytes exceeds reserve")
+        # RENUM_BANK is appended last: bank3 is extra-bank 0, then the data banks,
+        # then this one -> absolute number NUM_BANKS + 1 + len(data_banks).
+        renum_bank_num = NUM_BANKS + 1 + len(data_banks)
+        handler = bytearray(handler)
+        handler[RENUMBANK_OFF] = renum_bank_num
+        handler = bytes(handler)
+        rb = bytearray(b"\x00" * BANK_SIZE)
+        rb[0:len(renum)] = renum
+        rb[MENU_OFF:MENU_OFF + len(menu)] = menu
+        renum_bank = bytes(rb)
+
     bank3 = bytearray(b"\x00" * BANK_SIZE)
     bank3[0:len(pager)] = pager
     bank3[INDEX_OFF:INDEX_OFF + len(index)] = index
     bank3[HANDLER_OFF:HANDLER_OFF + len(handler)] = handler
-    banks = [bytes(bank3)]
-    banks += [data[i:i + BANK_SIZE] for i in range(0, len(data), BANK_SIZE)]
+    banks = [bytes(bank3)] + data_banks
+    if renum_bank is not None:
+        banks.append(renum_bank)
     return banks
 
 
@@ -162,6 +187,8 @@ def main() -> int:
     parser.add_argument("--index", type=Path, help="docs topic index (build/docs.idx)")
     parser.add_argument("--data", type=Path, help="docs line stream (build/docs.dat)")
     parser.add_argument("--handler", type=Path, help="RESTORE handler binary (raw, for $033c)")
+    parser.add_argument("--renum", type=Path, help="renum tool binary (raw, for $c000)")
+    parser.add_argument("--menu", type=Path, help="menu-body UI binary (raw, for $c000)")
     args = parser.parse_args()
 
     extra = None
@@ -169,8 +196,14 @@ def main() -> int:
     if any(docs_args):
         if not all(docs_args):
             parser.error("--pager, --index, --data and --handler must be given together")
+        renum_args = (args.renum, args.menu)
+        if any(renum_args) and not all(renum_args):
+            parser.error("--renum and --menu must be given together")
+        renum = args.renum.read_bytes() if args.renum else b""
+        menu = args.menu.read_bytes() if args.menu else b""
         extra = doc_banks(args.pager.read_bytes(), args.index.read_bytes(),
-                          args.data.read_bytes(), args.handler.read_bytes())
+                          args.data.read_bytes(), args.handler.read_bytes(),
+                          renum=renum, menu=menu)
 
     image = image_from_prg(args.prg.read_bytes())
     crt = build_crt(image, name=args.name, stub=args.stub.read_bytes(),

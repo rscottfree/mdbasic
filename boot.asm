@@ -15,7 +15,7 @@
 
 HANDLER_SRC = $9800     ;handler location in cart bank 3 (bank offset $1800)
 HANDLER_DST = $033c     ;cassette buffer (unused by MDBASIC)
-HANDLER_LEN = $80       ;128 bytes copied (handler is ~120)
+HANDLER_LEN = $a0       ;160 bytes copied (menu.asm $033c stub is ~145)
 REALGONE    = $03f8     ;stash for the original execut address (lo,hi)
 HELP_BANK   = 3
 TRPTR       = $5c       ;zp pointer to troff's ldx operand (set by cold start)
