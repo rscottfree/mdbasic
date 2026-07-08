@@ -3,7 +3,7 @@
 
 do_move's pre-flight used to reject end<=start, which wrongly rejected moving
 a single line (start==end is a valid one-line block; only end<start is an
-error). Covers the fixed check in renum_tool.asm's do_move plus the updated
+error). Covers the fixed check in edit_tool_common.asm's do_move plus the updated
 "?end<start" message, driven the same way as tools/vice_renum_test.py.
 
 Runnable standalone (runs just `single_move`) or as part of the unified
@@ -37,7 +37,7 @@ def session_single_move(crt, dorenum, domenu, next_port):
         time.sleep(6.0)
         s.close()
         lib.type_lines(port, prog)
-        lib.open_tool(port, dorenum)
+        lib.open_tool(port, lib.DOMOVE)
         lib.cmd(port, "M 200 200 50")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()

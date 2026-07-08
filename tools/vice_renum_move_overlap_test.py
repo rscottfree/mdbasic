@@ -46,7 +46,7 @@ def session_move_overlap(crt, dorenum, domenu, next_port):
         before = lib.read_prog(s)
         s.close()
 
-        lib.open_tool(port, dorenum)
+        lib.open_tool(port, lib.DOMOVE)
 
         # Source block [5,7] covers lines 5 and 7 (minsrc=5, maxsrc=7); dest=2
         # -> shifted range [2,4], which contains the kept line 3.

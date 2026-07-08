@@ -26,7 +26,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 import vice_prg_test as harness
 import vice_docs_test as dt
 
-BASEPORT = 6560
+BASEPORT = 6760
+DOMOVE = None
+DOCOPY = None
 
 
 def boot(port, crt):
@@ -109,9 +111,13 @@ def run_cli(registry: list[tuple[str, callable]], argv: list[str]) -> int:
         selected = registry
 
     crt, _dodocs = dt.build_cart()
+    global DOMOVE, DOCOPY
     dorenum = dt.label_addr("/tmp/menu.lst", "dorenum")
+    DOMOVE = dt.label_addr("/tmp/menu.lst", "domove")
+    DOCOPY = dt.label_addr("/tmp/menu.lst", "docopy")
     domenu = dt.label_addr("/tmp/menu.lst", "domenu")
-    print(f"dorenum=${dorenum:04x} domenu=${domenu:04x}")
+    print(f"dorenum=${dorenum:04x} domove=${DOMOVE:04x} "
+          f"docopy=${DOCOPY:04x} domenu=${domenu:04x}")
 
     port_iter = iter(range(BASEPORT, BASEPORT + 1000))
     next_port = lambda: next(port_iter)

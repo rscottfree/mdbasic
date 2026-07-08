@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""End-to-end test of the MDBASIC CTRL+RESTORE renumber/move tool in VICE.
+"""End-to-end test of the MDBASIC CTRL+RESTORE renumber/move/copy tools in VICE.
 
-Builds the full docs+menu+renum cart (reusing vice_docs_test.build_cart), boots
+Builds the full docs+menu+tool cart (reusing vice_docs_test.build_cart), boots
 it, types a known BASIC program, then SYSes a synthetic-NMI stub that jumps to the
-menu's `dorenum` entry (the exact code the F3 menu choice runs, past the CTRL/STOP
-gate) so the renum tool's REPL opens. Commands are driven through the kernal key
+menu's direct tool entries (past the CTRL/STOP gate), so each tool's REPL opens.
+Commands are driven through the kernal key
 buffer; the resulting program is checked by LISTing it and by comparing the raw
 program bytes ($0801..VARTAB) for the reject cases (a rejected R/M must leave the
 program byte-identical).
 
-Covered: default/ranged R with reference rewrite (incl. digit-count growth), R's
+Covered: menu choices, default/ranged R with reference rewrite (incl. digit-count growth), R's
 explicit <dest> anchoring the new numbering away from <start>, a valid M that
 physically relocates the block + rewrites its GOSUB (with <start> below the first
 actual source line, so the block anchors on <dest> rather than on minsrc-mstart+
@@ -43,12 +43,14 @@ import renum_test_lib as lib
 
 
 def session_menu_choice(crt, dorenum, domenu, next_port):
-    """the menu-body itself (F1 -> pager, F3 -> renum tool). SYS to `domenu`
+    """the menu-body itself (F1 -> pager, R/M/C -> edit tools). SYS to `domenu`
     (past the CTRL/STOP gate); the menu-body draws its prompt and waits for a
-    key. A poked F1/F3 in the kernal buffer drives the choice."""
+    key. Poked keys in the kernal buffer drive each choice."""
     results = {}
     for key, want, tag in (("\x85", "SEARCH", "menu_f1_pager"),
-                            ("\x86", "RENUM", "menu_f3_renum")):
+                            ("r", "RENUMBER", "menu_r_renum"),
+                            ("m", "MOVE", "menu_m_move"),
+                            ("c", "COPY", "menu_c_copy")):
         port = next_port()
         proc = lib.boot(port, crt)
         try:
@@ -122,7 +124,7 @@ def session_renum_basic(crt, dorenum, domenu, next_port):
         s.close()
         harness.keyboard_type_on_port(port, "\x03")   # RUN/STOP -> leave tool
         time.sleep(0.6)
-        harness.keyboard_type_on_port(port, "LIST\r")
+        harness.keyboard_type_on_port(port, "\x93LIST\r")
         time.sleep(1.2)
         s = harness.connect_monitor(port, 20.0)
         lst = harness.screen_text(s).upper()
@@ -151,7 +153,7 @@ def session_move_basic(crt, dorenum, domenu, next_port):
     try:
         s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
         lib.type_lines(port, prog2)
-        lib.open_tool(port, dorenum)
+        lib.open_tool(port, lib.DOMOVE)
         lib.cmd(port, "M 150 210 15")
         s = harness.connect_monitor(port, 20.0)
         results["move_ok"] = "OK" in harness.screen_text(s).upper()
@@ -190,7 +192,7 @@ def session_reject(crt, dorenum, domenu, next_port):
         s = harness.connect_monitor(port, 20.0)
         before = lib.read_prog(s)
         s.close()
-        lib.open_tool(port, dorenum)
+        lib.open_tool(port, lib.DOMOVE)
         # end <= start
         lib.cmd(port, "M 30 20 500")
         s = harness.connect_monitor(port, 20.0)
@@ -205,6 +207,9 @@ def session_reject(crt, dorenum, domenu, next_port):
         results["reject_coll_msg"] = "COLLISION" in txt
         results["reject_coll_id"] = lib.read_prog(s) == before
         s.close()
+        harness.keyboard_type_on_port(port, "\x03")
+        time.sleep(0.6)
+        lib.open_tool(port, dorenum)
         # renum overflow: R 40000 100 -> 100, 40100(collision-free) then next >63999
         lib.cmd(port, "R 40000 10")
         s = harness.connect_monitor(port, 20.0)
@@ -246,7 +251,7 @@ def session_shrink(crt, dorenum, domenu, next_port):
         s.close()
         harness.keyboard_type_on_port(port, "\x03")
         time.sleep(0.6)
-        harness.keyboard_type_on_port(port, "LIST\r")
+        harness.keyboard_type_on_port(port, "\x93LIST\r")
         time.sleep(1.2)
         s = harness.connect_monitor(port, 20.0)
         lst = harness.screen_text(s).upper()
@@ -371,6 +376,52 @@ def session_dest_anchor(crt, dorenum, domenu, next_port):
     return results
 
 
+def session_copy_basic(crt, dorenum, domenu, next_port):
+    """copy success + internal reference retarget + reject identity.
+    10 GOSUB 100 / 20 END / 100 PRINT"SUB" / 110 GOTO 100 / 120 RETURN
+    C 100 120 200 leaves the source in place and creates
+    200 PRINT"SUB" / 210 GOTO 200 / 220 RETURN. The external 10 GOSUB 100 and
+    original 110 GOTO 100 must stay pointed at the source block. A colliding copy
+    is rejected before mutation."""
+    results = {}
+    port = next_port()
+    prog = ["10 GOSUB 100", "20 END", '100 PRINT"SUB"', "110 GOTO 100", "120 RETURN"]
+    proc = lib.boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        lib.type_lines(port, prog)
+        s = harness.connect_monitor(port, 20.0)
+        before = lib.read_prog(s)
+        s.close()
+        lib.open_tool(port, lib.DOCOPY)
+        lib.cmd(port, "C 100 120 110")
+        s = harness.connect_monitor(port, 20.0)
+        txt = harness.screen_text(s).upper()
+        results["copy_reject_coll_msg"] = "COLLISION" in txt
+        results["copy_reject_coll_id"] = lib.read_prog(s) == before
+        s.close()
+        lib.cmd(port, "C 100 120 200")
+        s = harness.connect_monitor(port, 20.0)
+        results["copy_ok"] = "OK" in harness.screen_text(s).upper()
+        nums = lib.walk_links(s)
+        s.close()
+        results["copy_links_valid"] = nums == [10, 20, 100, 110, 120, 200, 210, 220]
+        harness.keyboard_type_on_port(port, "\x03")
+        time.sleep(0.6)
+        harness.keyboard_type_on_port(port, "\x93LIST\r")
+        time.sleep(1.2)
+        s = harness.connect_monitor(port, 20.0)
+        lst = harness.screen_text(s).upper()
+        s.close()
+        results["copy_source_kept"] = "10 GOSUB 100" in lst and "110 GOTO 100" in lst
+        results["copy_headers"] = "200 PRINT" in lst and "220 RETURN" in lst
+        results["copy_internal_ref"] = "210 GOTO 200" in lst
+        harness.quit_vice(harness.connect_monitor(port, 20.0))
+    finally:
+        lib.finish(proc)
+    return results
+
+
 TESTS = [
     ("menu_choice", session_menu_choice),
     ("menu_screen", session_menu_screen),
@@ -381,6 +432,7 @@ TESTS = [
     ("big", session_big),
     ("screen_backup", session_screen_backup),
     ("dest_anchor", session_dest_anchor),
+    ("copy_basic", session_copy_basic),
 ]
 
 # Union in the sibling files' registries so this one entry point can run the

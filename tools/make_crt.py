@@ -63,12 +63,10 @@ HANDLER_LEN = 0xb8           # boot.asm HANDLER_LEN: fixed byte count boot.asm c
                              # boot.asm's own constant, or the copy silently truncates
                              # menu.asm's tail at boot/cart-install time
 DOCSFLAG_OFF = 9             # boot.asm `docsflag` word, at stub $8009
-RENUMBANK_OFF = 3            # menu.asm `renumbank` byte, at $033f (offset 3 past its JMP)
-MENU_OFF = 0x1800            # menu-body UI sits at RENUM_BANK $9800 (renum tool is $8000,
-                             # 24 pages = 6K -- the renum/move/copy tool outgrew the 12-page/
-                             # 3K PAGER_MAX-sized reserve it originally shared with the docs
-                             # pager's bank-3 layout; menu.asm's lrenum/runmenu copy sizes
-                             # and source page must stay in sync with this)
+TOOLBANKS_OFF = 3            # menu.asm `toolbanks`, at $033f (offset 3 past its JMP)
+MENU_OFF = 0x1800            # menu-body UI sits at the first tool bank's $9800
+TOOL_MAX = PAGER_MAX         # menu.asm copies 12 pages: $c000-$cbff, leaving SCRBUF
+                             # at $cc00-$cfff intact
 STUB_PATH = Path(__file__).with_name("cart_boot.bin")
 
 
@@ -99,12 +97,13 @@ def _cart_header(name: str) -> bytearray:
     return header
 
 
-def doc_banks(pager: bytes, index: bytes, data: bytes,
-              handler: bytes = b"", renum: bytes = b"", menu: bytes = b"") -> list[bytes]:
+def doc_banks(pager: bytes, index: bytes, data: bytes, handler: bytes = b"",
+              renum: bytes = b"", move: bytes = b"", copy: bytes = b"",
+              menu: bytes = b"") -> list[bytes]:
     """Compose the cart banks: bank 3 = pager+index+handler, banks 4+ = doc data,
-    and (if renum/menu are given) a final RENUM_BANK = renum tool ($8000) + menu-body
-    ($8c00). The RENUM_BANK number depends on the doc-data bank count, so its value
-    is patched into the handler's `renumbank` byte here (menu.asm offset 3)."""
+    and (if tools/menu are given) three final tool banks: renumber, move, copy.
+    The first tool bank also carries menu-body at $9800. Tool bank numbers depend
+    on the doc-data bank count, so they are patched into handler `toolbanks` here."""
     if len(pager) > PAGER_MAX:
         raise ValueError(f"pager {len(pager)} bytes exceeds {PAGER_MAX}")
     if len(index) > HANDLER_OFF - INDEX_OFF:
@@ -120,30 +119,35 @@ def doc_banks(pager: bytes, index: bytes, data: bytes,
         raise ValueError(f"doc data {len(data)} not a multiple of {BANK_SIZE}")
     data_banks = [data[i:i + BANK_SIZE] for i in range(0, len(data), BANK_SIZE)]
 
-    renum_bank = None
-    if renum or menu:
-        if len(renum) > MENU_OFF:
-            raise ValueError(f"renum tool {len(renum)} bytes exceeds {MENU_OFF}")
+    tool_banks = []
+    if renum or move or copy or menu:
+        if not (renum and move and copy and menu):
+            raise ValueError("renum, move, copy and menu must be given together")
+        for name, tool in (("renum", renum), ("move", move), ("copy", copy)):
+            if len(tool) > TOOL_MAX:
+                raise ValueError(f"{name} tool {len(tool)} bytes exceeds {TOOL_MAX} "
+                                 f"runtime copy limit ($c000-$cbff)")
         if len(menu) > BANK_SIZE - MENU_OFF:
             raise ValueError(f"menu-body {len(menu)} bytes exceeds reserve")
-        # RENUM_BANK is appended last: bank3 is extra-bank 0, then the data banks,
-        # then this one -> absolute number NUM_BANKS + 1 + len(data_banks).
-        renum_bank_num = NUM_BANKS + 1 + len(data_banks)
+        # Tool banks are appended after bank3 + doc data.
+        first_tool_bank = NUM_BANKS + 1 + len(data_banks)
         handler = bytearray(handler)
-        handler[RENUMBANK_OFF] = renum_bank_num
+        handler[TOOLBANKS_OFF:TOOLBANKS_OFF + 3] = bytes([
+            first_tool_bank, first_tool_bank + 1, first_tool_bank + 2])
         handler = bytes(handler)
-        rb = bytearray(b"\x00" * BANK_SIZE)
-        rb[0:len(renum)] = renum
-        rb[MENU_OFF:MENU_OFF + len(menu)] = menu
-        renum_bank = bytes(rb)
+        for i, tool in enumerate((renum, move, copy)):
+            tb = bytearray(b"\x00" * BANK_SIZE)
+            tb[0:len(tool)] = tool
+            if i == 0:
+                tb[MENU_OFF:MENU_OFF + len(menu)] = menu
+            tool_banks.append(bytes(tb))
 
     bank3 = bytearray(b"\x00" * BANK_SIZE)
     bank3[0:len(pager)] = pager
     bank3[INDEX_OFF:INDEX_OFF + len(index)] = index
     bank3[HANDLER_OFF:HANDLER_OFF + len(handler)] = handler
     banks = [bytes(bank3)] + data_banks
-    if renum_bank is not None:
-        banks.append(renum_bank)
+    banks.extend(tool_banks)
     return banks
 
 
@@ -200,7 +204,9 @@ def main() -> int:
     parser.add_argument("--index", type=Path, help="docs topic index (build/docs.idx)")
     parser.add_argument("--data", type=Path, help="docs line stream (build/docs.dat)")
     parser.add_argument("--handler", type=Path, help="RESTORE handler binary (raw, for $033c)")
-    parser.add_argument("--renum", type=Path, help="renum tool binary (raw, for $c000)")
+    parser.add_argument("--renum", type=Path, help="renumber tool binary (raw, for $c000)")
+    parser.add_argument("--move", type=Path, help="move tool binary (raw, for $c000)")
+    parser.add_argument("--copy", type=Path, help="copy tool binary (raw, for $c000)")
     parser.add_argument("--menu", type=Path, help="menu-body UI binary (raw, for $c000)")
     args = parser.parse_args()
 
@@ -209,14 +215,16 @@ def main() -> int:
     if any(docs_args):
         if not all(docs_args):
             parser.error("--pager, --index, --data and --handler must be given together")
-        renum_args = (args.renum, args.menu)
+        renum_args = (args.renum, args.move, args.copy, args.menu)
         if any(renum_args) and not all(renum_args):
-            parser.error("--renum and --menu must be given together")
+            parser.error("--renum, --move, --copy and --menu must be given together")
         renum = args.renum.read_bytes() if args.renum else b""
+        move = args.move.read_bytes() if args.move else b""
+        copy = args.copy.read_bytes() if args.copy else b""
         menu = args.menu.read_bytes() if args.menu else b""
         extra = doc_banks(args.pager.read_bytes(), args.index.read_bytes(),
                           args.data.read_bytes(), args.handler.read_bytes(),
-                          renum=renum, menu=menu)
+                          renum=renum, move=move, copy=copy, menu=menu)
 
     image = image_from_prg(args.prg.read_bytes())
     crt = build_crt(image, name=args.name, stub=args.stub.read_bytes(),

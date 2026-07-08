@@ -130,6 +130,7 @@ def keyboard_type_on_port(port: int, text: str) -> None:
         chunk = data[offset : offset + 10]
         sock = connect_monitor(port, 5.0)
         try:
+            wait_keyboard_empty(sock)
             mem_set(sock, 0x0277, chunk)
             mem_set(sock, 0x00C6, bytes([len(chunk)]))
         finally:

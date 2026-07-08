@@ -1,2 +1,2 @@
-TOOL_RENUM = 1
+TOOL_COPY = 1
 .include "edit_tool_common.asm"

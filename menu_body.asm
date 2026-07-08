@@ -1,16 +1,16 @@
 ; ***MDBASIC CTRL+RESTORE menu-body UI***
-; Drawn/run at $c000 (copied there from RENUM_BANK $8c00 by the $033c stub in
+; Drawn/run at $c000 (copied there from the first tool bank's $9800 by the $033c stub in
 ; menu.asm). This is the ONE place that snapshots screen RAM + cursor + blink
 ; state for the whole CTRL+RESTORE flow -- see SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN
 ; below. menu.asm's `runmenu` always runs this before any tool, in one of two
 ; modes selected by SAVEONLY:
 ;
-;   SAVEONLY = 0 (domenu, the real CTRL+RESTORE path): draws three menu lines
+;   SAVEONLY = 0 (domenu, the real CTRL+RESTORE path): draws five menu lines
 ;   (one item per row) at the top of the screen with the blinking cursor
 ;   disabled (this is a GETIN read loop, not the screen editor -- there's no
 ;   real cursor to blink), reads one key, and returns the choice in X: 0 =
-;   dismiss, 1 = docs pager, 2 = renum. On dismiss (nothing else follows) it
-;   restores the screen/cursor/blink itself; on F1/F3 it leaves that to the
+;   dismiss, 1 = docs pager, 2 = renumber, 3 = move, 4 = copy. On dismiss it
+;   restores the screen/cursor/blink itself; on F1/R/M/C it leaves that to the
 ;   dispatched tool's own exit, since SCRBUF/SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN
 ;   already hold the true pre-menu state for it to restore from.
 ;
@@ -22,11 +22,11 @@
 ; This runs BEFORE any tool is launched (the stub copies the chosen tool over
 ; $c000 afterwards), so it is free to live in the tool region. In full-UI mode
 ; it points the func-key decode vector back at the kernal standard for the read
-; (MDBASIC otherwise expands F1/F3 to KEY strings) and restores it before
+; (MDBASIC otherwise expands F1 to a KEY string) and restores it before
 ; returning, so the tool that follows sees the user's real KEYLOG hook.
 ;
 ; Same screen-snapshot idiom (SCRBUF $cc00, savhib SCREEN-1-5 fallback) as
-; docs_pager.asm / renum_tool.asm; see the renum-move-tool design memory.
+; docs_pager.asm / edit_tool_common.asm; see the renum-move-tool design memory.
 ;
 ; Assembled for $c000 (run location).
 
@@ -56,15 +56,19 @@ CI2PRA   = $dd00
 ROW0     = $0400      ;screen RAM row 0 (top line)
 ROW1     = $0428      ;row 1
 ROW2     = $0450      ;row 2
+ROW3     = $0478      ;row 3
+ROW4     = $04a0      ;row 4
 KEY_F1   = $85
-KEY_F3   = $86
+KEY_R    = "r"
+KEY_M    = "m"
+KEY_C    = "c"
 KEY_STOP = $03
 
-;--- shared CTRL+RESTORE handoff (also used by renum_tool.asm/docs_pager.asm) ---
+;--- shared CTRL+RESTORE handoff (also used by edit_tool_common.asm/docs_pager.asm) ---
 ;This save happens exactly once per invocation, here. The chosen tool's own
 ;exit reads these back to restore -- it never re-saves. Zero page: menu.asm's
 ;copyrun scratch ($02-$05,$fb-$fe) is transient and expires before this code
-;runs; these addresses also avoid renum_tool.asm's persistent zero page (COUNT
+;runs; these addresses also avoid edit_tool_common.asm's persistent zero page (COUNT
 ;$0b, LINNUM $14, TXTTAB $2b, etc.) and docs_pager.asm's (TMP $02, SRCP $fb,
 ;SCRP $fd).
 SAVEONLY = $0e        ;0 = full UI (below); nonzero = quick save-only path
@@ -78,7 +82,7 @@ SAVBLN   = $0d        ;saved BLNSW (blink-enable state at CTRL+RESTORE time)
 
 start
  lda SAVEONLY
- beq fullui           ;0 -> show the real F1/F3/STOP menu (domenu)
+ beq fullui           ;0 -> show the real F1/R/M/C/STOP menu (domenu)
 ;--- quick save-only path (dodocs/dorenum): snapshot and return immediately ---
  lda HIBASE
  sta SAVHIB
@@ -132,6 +136,20 @@ draw3
  sta ROW2,x
  dex
  bpl draw3
+ ldx #PROMPT4LEN-1
+draw4
+ lda prompt4,x
+ and #$3f
+ sta ROW3,x
+ dex
+ bpl draw4
+ ldx #PROMPT5LEN-1
+draw5
+ lda prompt5,x
+ and #$3f
+ sta ROW4,x
+ dex
+ bpl draw5
  cli                  ;let the kernal IRQ scan the keyboard for GETIN
 keyloop
  jsr GETIN
@@ -139,7 +157,13 @@ keyloop
  cmp #KEY_F1
  beq chosen
  ldx #2
- cmp #KEY_F3
+ cmp #KEY_R
+ beq chosen
+ ldx #3
+ cmp #KEY_M
+ beq chosen
+ ldx #4
+ cmp #KEY_C
  beq chosen
  ldx #0
  cmp #KEY_STOP
@@ -148,7 +172,7 @@ chosen
  stx svchoice
  sei
  cpx #0
- bne fin              ;F1/F3 chosen -> leave screen/cursor/blink saved as-is for
+ bne fin              ;F1/R/M/C chosen -> leave screen/cursor/blink saved as-is for
                       ;the dispatched tool's own exit to restore; nothing to
                       ;undo here
  lda SAVHIB
@@ -179,7 +203,7 @@ fin
  ldx svchoice
  rts
 
-;force canonical text screen (identical idiom to renum_tool.asm/docs_pager.asm)
+;force canonical text screen (identical idiom to edit_tool_common.asm/docs_pager.asm)
 forcetext
  lda CI2PRA
  ora #%00000011       ;VIC 16K bank 0
@@ -193,8 +217,8 @@ forcetext
  rts
 
 ;==================== screen snapshot / restore ====================
-;Same idiom as renum_tool.asm's savescreen/restorescreen. CLRSCR homes
-;PNT/PNTR/TBLX, so (like the renum tool, unlike the pager) PNT must be
+;Same idiom as edit_tool_common.asm's savescreen/restorescreen. CLRSCR homes
+;PNT/PNTR/TBLX, so (like the edit tools, unlike the pager) PNT must be
 ;explicitly saved and restored here rather than assumed undisturbed.
 savescreen
  lda BLNON
@@ -250,9 +274,13 @@ rs_cp
 
 prompt1 .text "F1=DOCS"
 PROMPT1LEN = *-prompt1
-prompt2 .text "F3=RENUM"
+prompt2 .text "R=RENUMBER"
 PROMPT2LEN = *-prompt2
-prompt3 .text "STOP=QUIT"
+prompt3 .text "M=MOVE"
 PROMPT3LEN = *-prompt3
+prompt4 .text "C=COPY"
+PROMPT4LEN = *-prompt4
+prompt5 .text "STOP=QUIT"
+PROMPT5LEN = *-prompt5
 svkey .word 0
 svchoice .byte 0
