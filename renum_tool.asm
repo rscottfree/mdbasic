@@ -11,6 +11,13 @@
 ;                                   (or <inc> if <start> is also omitted).
 ;   M <start> <end> <dest>       -- move+renumber a block, update its external
 ;                                   references, and relocate it to sorted order.
+;   C <start> <end> <dest>       -- copy a block to a new, non-overlapping
+;                                   destination (the destination range must not
+;                                   overlap any existing line, including the
+;                                   source range itself). Internal references
+;                                   within the copy are retargeted to the new
+;                                   numbers; the source block is left untouched,
+;                                   so references elsewhere to it are unaffected.
 ;   RUN/STOP                     -- leave the tool.
 ;
 ; Every operation is validated by a pre-flight pass (below) that rejects a bad
@@ -286,6 +293,10 @@ ex_notr
  bne ex_notm
  jmp ex_move
 ex_notm
+ cmp #"c"
+ bne ex_notc
+ jmp ex_copy
+ex_notc
  cmp #0
  beq ex_done          ;empty line -> nothing
  lda #1
@@ -374,6 +385,30 @@ ex_syn
  lda #1
  sta resultcode
  rts
+
+ex_copy
+ inx                  ;skip C
+ lda #2
+ sta op
+ jsr getnum
+ bcc ex_syn
+ lda numbuf
+ sta mstart
+ lda numbuf+1
+ sta mstart+1
+ jsr getnum
+ bcc ex_syn
+ lda numbuf
+ sta mend
+ lda numbuf+1
+ sta mend+1
+ jsr getnum
+ bcc ex_syn
+ lda numbuf
+ sta mdest
+ lda numbuf+1
+ sta mdest+1
+ jmp do_copy
 
 ;skipsp: advance X over spaces in inbuf
 skipsp
@@ -987,6 +1022,365 @@ rv_b
 rv_x
  rts
 
+;==================== COPY ====================
+do_copy
+ ;require end >= start (a single line is a valid copy)
+ lda mend+1
+ cmp mstart+1
+ bcc dc_bad
+ bne dc_ok1
+ lda mend
+ cmp mstart
+ bcc dc_bad
+dc_ok1
+ jsr val_copy
+ lda resultcode
+ bne dc_x
+ jsr cp_reserve        ;open a blocklen gap at the sorted dest position and
+                       ;duplicate the source block's raw bytes into it
+ jsr refpass_blk       ;retarget internal GOTO/etc refs (source range -> dest),
+                       ;scoped to just the new copy -- resizes in place as needed
+ jsr hdr_copy          ;renumber the copy's own line headers
+ jsr relink
+ jsr finishop
+ lda #0
+ sta resultcode
+dc_x
+ rts
+dc_bad
+ lda #5                ;END<START
+ sta resultcode
+ rts
+
+;val_copy: pre-flight. Like val_move's scan (finds minsrc/maxsrc/scount over
+;[mstart,mend] and computes newmin/newmax = mdest.. mdest+(maxsrc-minsrc)), but
+;the collision check does NOT skip source-range lines -- a copy leaves the
+;source in place, so the destination must not overlap it either.
+val_copy
+ lda #0
+ sta scount
+ sta scount+1
+ jsr set_mrange        ;rlo=mstart, rhi=mend
+ jsr lp_first
+vc_lp
+ jsr lp_num
+ beq vc_endw
+ jsr in_range
+ bcc vc_next
+ lda scount
+ ora scount+1
+ bne vc_nf
+ lda curnum
+ sta minsrc
+ lda curnum+1
+ sta minsrc+1
+vc_nf
+ lda curnum
+ sta maxsrc
+ lda curnum+1
+ sta maxsrc+1
+ inc scount
+ bne vc_next
+ inc scount+1
+vc_next
+ jsr lp_next
+ jmp vc_lp
+vc_endw
+ lda scount
+ ora scount+1
+ bne vc_have
+ lda #4                ;NO LINES
+ sta resultcode
+ rts
+vc_have
+ lda mdest
+ sta newmin
+ lda mdest+1
+ sta newmin+1
+ sec
+ lda maxsrc
+ sbc minsrc
+ sta newmax
+ lda maxsrc+1
+ sbc minsrc+1
+ sta newmax+1
+ clc
+ lda newmax
+ adc mdest
+ sta newmax
+ lda newmax+1
+ adc mdest+1
+ sta newmax+1
+ bcs vc_range          ;carry out of 16 bits -> > 63999
+ lda newmax+1
+ cmp #$fa
+ bcs vc_range
+ ;collision: ANY line (including the source range) with num in [newmin,newmax]?
+ jsr lp_first
+vc_clp
+ jsr lp_num
+ beq vc_ok
+ jsr set_nrange        ;rlo=newmin, rhi=newmax
+ jsr in_range
+ bcs vc_coll
+ jsr lp_next
+ jmp vc_clp
+vc_ok
+ lda #0
+ sta resultcode
+ rts
+vc_range
+ lda #2
+ sta resultcode
+ rts
+vc_coll
+ lda #3
+ sta resultcode
+ rts
+
+;cp_reserve: find the source block [P0,P1) and the sorted insertion point
+;(blkstart = first line's address with num > newmax, or end-of-program), open a
+;blocklen-byte gap there by shifting [blkstart,STREND) up in one descending pass,
+;bump VARTAB/ARYTAB/STREND by blocklen (so refpass_blk's own inc2d/dec2d growth
+;shifts against the correct new top), then duplicate the source block's raw
+;bytes (still bearing the OLD headers/numbers) into the gap.
+cp_reserve
+ jsr set_mrange
+ jsr lp_first
+cpr_f0
+ jsr lp_num
+ bne cpr_f0c
+ rts                   ;can't happen -- val_copy already confirmed lines exist
+cpr_f0c
+ jsr in_range
+ bcs cpr_p0
+ jsr lp_next
+ jmp cpr_f0
+cpr_p0
+ lda LP
+ sta P0
+ lda LP+1
+ sta P0+1
+cpr_f1
+ jsr lp_next
+ jsr lp_num
+ beq cpr_p1            ;end of program -> P1 here
+ jsr in_range
+ bcs cpr_f1
+cpr_p1
+ lda LP
+ sta P1
+ lda LP+1
+ sta P1+1
+ sec
+ lda P1
+ sbc P0
+ sta blocklen
+ lda P1+1
+ sbc P0+1
+ sta blocklen+1
+ jsr lp_first
+cpr_ins
+ jsr lp_num
+ beq cpr_haveins        ;end -> append point
+ lda newmax
+ sta rlo
+ lda newmax+1
+ sta rlo+1
+ jsr cmp_cur_rlo        ;C=curnum>=newmax, Z=equal
+ bcc cpr_insn
+ beq cpr_insn
+ jmp cpr_haveins
+cpr_insn
+ jsr lp_next
+ jmp cpr_ins
+cpr_haveins
+ lda LP
+ sta blkstart
+ lda LP+1
+ sta blkstart+1
+ ;srcpost = (P0 >= blkstart) ? P0+blocklen : P0 -- where the source's original
+ ;bytes end up once the shift below moves everything from blkstart upward
+ lda P0+1
+ cmp blkstart+1
+ bne cpr_cmp1
+ lda P0
+ cmp blkstart
+cpr_cmp1
+ bcc cpr_nomove
+ clc
+ lda P0
+ adc blocklen
+ sta srcpost
+ lda P0+1
+ adc blocklen+1
+ sta srcpost+1
+ jmp cpr_havesrc
+cpr_nomove
+ lda P0
+ sta srcpost
+ lda P0+1
+ sta srcpost+1
+cpr_havesrc
+ ;shift [blkstart,STREND) up by blocklen bytes, high-to-low (RVA=src, RVB=dst)
+ sec
+ lda STREND
+ sbc blkstart
+ sta cnt
+ lda STREND+1
+ sbc blkstart+1
+ sta cnt+1
+ lda STREND
+ sec
+ sbc #1
+ sta RVA
+ lda STREND+1
+ sbc #0
+ sta RVA+1
+ clc
+ lda RVA
+ adc blocklen
+ sta RVB
+ lda RVA+1
+ adc blocklen+1
+ sta RVB+1
+cpr_shlp
+ lda cnt
+ ora cnt+1
+ beq cpr_shdone
+ ldy #0
+ lda (RVA),y
+ sta (RVB),y
+ lda RVA
+ bne cpr_s1
+ dec RVA+1
+cpr_s1
+ dec RVA
+ lda RVB
+ bne cpr_s2
+ dec RVB+1
+cpr_s2
+ dec RVB
+ sec
+ lda cnt
+ sbc #1
+ sta cnt
+ lda cnt+1
+ sbc #0
+ sta cnt+1
+ jmp cpr_shlp
+cpr_shdone
+ clc
+ lda VARTAB
+ adc blocklen
+ sta VARTAB
+ lda VARTAB+1
+ adc blocklen+1
+ sta VARTAB+1
+ clc
+ lda ARYTAB
+ adc blocklen
+ sta ARYTAB
+ lda ARYTAB+1
+ adc blocklen+1
+ sta ARYTAB+1
+ clc
+ lda STREND
+ adc blocklen
+ sta STREND
+ lda STREND+1
+ adc blocklen+1
+ sta STREND+1
+ ;duplicate the raw source bytes into the freshly opened gap
+ lda srcpost
+ sta RVA
+ lda srcpost+1
+ sta RVA+1
+ lda blkstart
+ sta RVB
+ lda blkstart+1
+ sta RVB+1
+ lda blocklen
+ sta t16
+ lda blocklen+1
+ sta t16+1
+cpr_cplp
+ lda t16
+ ora t16+1
+ beq cpr_x
+ ldy #0
+ lda (RVA),y
+ sta (RVB),y
+ inc RVA
+ bne cpr_c1
+ inc RVA+1
+cpr_c1
+ inc RVB
+ bne cpr_c2
+ inc RVB+1
+cpr_c2
+ sec
+ lda t16
+ sbc #1
+ sta t16
+ lda t16+1
+ sbc #0
+ sta t16+1
+ jmp cpr_cplp
+cpr_x
+ rts
+
+;hdr_copy: rewrite the duplicate's own line headers to the new sequential
+;numbers (curheader - minsrc + mdest), walking exactly scount lines by content-
+;scan (lp_next_scan) since the duplicate's link fields are still stale copies
+;of the originals' until the next relink.
+hdr_copy
+ lda blkstart
+ sta LP
+ lda blkstart+1
+ sta LP+1
+ lda scount
+ sta cnt
+ lda scount+1
+ sta cnt+1
+hc_lp
+ lda cnt
+ ora cnt+1
+ beq hc_x
+ sec
+ lda cnt
+ sbc #1
+ sta cnt
+ lda cnt+1
+ sbc #0
+ sta cnt+1
+ ldy #2
+ lda (LP),y
+ sec
+ sbc minsrc
+ sta t16
+ iny
+ lda (LP),y
+ sbc minsrc+1
+ sta t16+1
+ clc
+ lda t16
+ adc mdest
+ sta t16
+ lda t16+1
+ adc mdest+1
+ sta t16+1
+ ldy #2
+ lda t16
+ sta (LP),y
+ iny
+ lda t16+1
+ sta (LP),y
+ jsr lp_next_scan
+ jmp hc_lp
+hc_x
+ rts
+
 ;==================== old->new mapping (called by the ported scanner) ====================
 ;mapnum: LINNUM = a referenced line number. Produce its new-number ASCII string in
 ;BAD ($0100) via fltstr. Free to clobber LP/ACC (the scanner restores TXTPTR).
@@ -1240,7 +1634,16 @@ finishop
 ; Ported verbatim from mdbasic.asm renumer pass 2. Walks every line; on each line-
 ; number-reference token it evaluates the number, maps it (mapnum), and overwrites
 ; the ASCII digits in place, growing/shrinking the program with inc2d/dec2d.
+;
+; refpass (blkmode=0) walks the whole program to end-of-link ($0000), as renum/
+; move need (every reference anywhere may need retargeting). refpass_blk
+; (blkmode=1) instead starts at blkstart and stops after exactly scount lines --
+; copy only wants to retarget references INSIDE the fresh duplicate, not scan the
+; (unmodified, still valid) rest of the program. Both share every byte of the
+; per-line body scan below; only rp_line's "next line / done" test differs.
 refpass
+ lda #0
+ sta blkmode
  lda TXTTAB
  sec
  sbc #1
@@ -1248,11 +1651,46 @@ refpass
  lda TXTTAB+1
  sbc #0
  sta TXTPTR+1
+ jmp rp_line
+
+refpass_blk
+ lda #1
+ sta blkmode
+ lda scount
+ sta blkcnt
+ lda scount+1
+ sta blkcnt+1
+ lda blkstart
+ sec
+ sbc #1
+ sta TXTPTR
+ lda blkstart+1
+ sbc #0
+ sta TXTPTR+1
+ ;fall through to rp_line
+
 rp_line
+ lda blkmode
+ bne rp_line_blk
  jsr getchr           ;link lo
  jsr getchr           ;link hi
  bne rp_l1
  jmp rp_done          ;$0000 link -> end of program
+rp_line_blk
+ lda blkcnt
+ ora blkcnt+1
+ bne rp_line_blkd
+ jmp rp_done          ;processed all scount lines of the block -> done
+rp_line_blkd
+ sec
+ lda blkcnt
+ sbc #1
+ sta blkcnt
+ lda blkcnt+1
+ sbc #0
+ sta blkcnt+1
+ jsr getchr           ;link lo
+ jsr getchr           ;link hi
 rp_l1
  jsr getchr           ;num lo
  jsr getchr           ;num hi
@@ -1417,11 +1855,13 @@ gotok
 ;text is authored lowercase so tmpx emits PETSCII $41-$5a (unshifted uppercase),
 ;which CHROUT/the screen render as real uppercase letters (not shifted graphics).
 hdrtxt
- .text "mdbasic renum / move"
+ .text "mdbasic renum / move / copy"
  .byte $0d
  .text "r [inc] [start] [end] [dest]"
  .byte $0d
  .text "m start end dest"
+ .byte $0d
+ .text "c start end dest"
  .byte $0d
  .text "run/stop = exit"
  .byte $0d, $0d, $00
@@ -1470,6 +1910,11 @@ swB       .word 0
 swC       .word 0
 rstart    .word 0
 rend      .word 0
+blocklen  .word 0
+srcpost   .word 0
+blkstart  .word 0
+blkcnt    .word 0
+blkmode   .byte 0
 resultcode .byte 0
 bufi      .byte 0
 sav01     .byte 0

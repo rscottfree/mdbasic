@@ -114,9 +114,11 @@ domenu
  jmp fin              ;0 = dismissed, launch nothing
 lpager
  lda #INDEX_BANK      ;docs pager: bank 3 $8000
- bne launchtool
+ ldx #12              ;12 pages = 3K (must match PAGER_MAX in tools/make_crt.py)
+ jmp launchtool
 lrenum
  lda renumbank        ;renum tool: RENUM_BANK $8000
+ ldx #24              ;24 pages = 6K (must match MENU_OFF in tools/make_crt.py)
 launchtool
  pha
  lda #$80
@@ -124,7 +126,6 @@ launchtool
  lda #$c0
  sta CPDST
  pla
- ldx #12              ;12 pages = 3K (must match PAGER_MAX in tools/make_crt.py)
  jsr copyrun          ;copy the tool to $c000 and run it; it RTSs back here
 fin
  lda SAV01
@@ -135,7 +136,7 @@ fin
 ;the full UI, returning the F1/F3/STOP choice in X, or the quick save-only path,
 ;whose X is undefined -- callers that set SAVEONLY=1 ignore it).
 runmenu
- lda #$8c
+ lda #$98             ;menu-body sits at RENUM_BANK $9800 (MENU_OFF in make_crt.py)
  sta CPSRC
  lda #$c0
  sta CPDST

@@ -64,7 +64,11 @@ HANDLER_LEN = 0xb8           # boot.asm HANDLER_LEN: fixed byte count boot.asm c
                              # menu.asm's tail at boot/cart-install time
 DOCSFLAG_OFF = 9             # boot.asm `docsflag` word, at stub $8009
 RENUMBANK_OFF = 3            # menu.asm `renumbank` byte, at $033f (offset 3 past its JMP)
-MENU_OFF = 0x0c00            # menu-body UI sits at RENUM_BANK $8c00 (renum tool is $8000)
+MENU_OFF = 0x1800            # menu-body UI sits at RENUM_BANK $9800 (renum tool is $8000,
+                             # 24 pages = 6K -- the renum/move/copy tool outgrew the 12-page/
+                             # 3K PAGER_MAX-sized reserve it originally shared with the docs
+                             # pager's bank-3 layout; menu.asm's lrenum/runmenu copy sizes
+                             # and source page must stay in sync with this)
 STUB_PATH = Path(__file__).with_name("cart_boot.bin")
 
 
