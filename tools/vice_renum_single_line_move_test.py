@@ -6,6 +6,9 @@ a single line (start==end is a valid one-line block; only end<start is an
 error). Covers the fixed check in renum_tool.asm's do_move plus the updated
 "?end<start" message, driven the same way as tools/vice_renum_test.py.
 
+Runnable standalone (runs just `single_move`) or as part of the unified
+`tools/vice_renum_test.py` invocation, which unions in this file's TESTS.
+
     tools/vice_renum_single_line_move_test.py
 """
 from __future__ import annotations
@@ -17,29 +20,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import vice_prg_test as harness
-import vice_docs_test as dt
-import vice_renum_test as rt
+import renum_test_lib as lib
 
 
-def main() -> int:
-    crt, _dodocs = dt.build_cart()
-    dorenum = dt.label_addr("/tmp/menu.lst", "dorenum")
+def session_single_move(crt, dorenum, domenu, next_port):
+    """100 GOSUB 200 / 200 PRINT"SUB" / 300 END
+    M 200 200 50 -> single-line block [200,200] moved to dest 50; the source
+    line must land exactly on 50, physically relocating before line 100, and
+    its reference (100 GOSUB 200) must be rewritten to GOSUB 50."""
     results = {}
-    port = 6640
-
-    # 100 GOSUB 200 / 200 PRINT"SUB" / 300 END
-    # M 200 200 50 -> single-line block [200,200] moved to dest 50; the source
-    # line must land exactly on 50, physically relocating before line 100, and
-    # its reference (100 GOSUB 200) must be rewritten to GOSUB 50.
+    port = next_port()
     prog = ["100 GOSUB 200", '200 PRINT"SUB"', "300 END"]
-    proc = rt.boot(port, crt)
+    proc = lib.boot(port, crt)
     try:
         s = harness.connect_monitor(port, 20.0)
         time.sleep(6.0)
         s.close()
-        rt.type_lines(port, prog)
-        rt.open_tool(port, dorenum)
-        rt.cmd(port, "M 200 200 50")
+        lib.type_lines(port, prog)
+        lib.open_tool(port, dorenum)
+        lib.cmd(port, "M 200 200 50")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["single_move_ok"] = "OK" in txt
@@ -50,7 +49,7 @@ def main() -> int:
         time.sleep(1.2)
         s = harness.connect_monitor(port, 20.0)
         lst = harness.screen_text(s).upper()
-        nums = rt.walk_links(s)
+        nums = lib.walk_links(s)
         s.close()
         results["single_move_hdr"] = "50 PRINT" in lst
         results["single_move_ref"] = "100 GOSUB 50" in lst
@@ -60,16 +59,14 @@ def main() -> int:
         results["single_move_links_valid"] = nums == [50, 100, 300]
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        proc.terminate()
-        try: proc.wait(timeout=5)
-        except Exception: proc.kill()
+        lib.finish(proc)
+    return results
 
-    for k, v in results.items():
-        print(f"  {'PASS' if v else 'FAIL'}  {k}")
-    ok = all(results.values())
-    print("PASS" if ok else "FAIL")
-    return 0 if ok else 1
+
+TESTS = [
+    ("single_move", session_single_move),
+]
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(lib.run_cli(TESTS, sys.argv[1:]))
