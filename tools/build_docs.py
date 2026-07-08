@@ -109,6 +109,28 @@ def topic_token(name: str, mdtok: dict[str, int]) -> int | None:
 # --------------------------------------------------------------------------- #
 # Screen-code conversion
 # --------------------------------------------------------------------------- #
+
+# Typographic Unicode -> ASCII the C64 charset can render. Markdown editors love
+# to smart-quote and em-dash text; those glyphs are outside ascii_to_screen's
+# range and would otherwise fall through to a blank space (screen code $20).
+# Applied to the raw markdown before wrapping so multi-char expansions (…->...)
+# are line-wrapped correctly.
+TYPOGRAPHY = {
+    "‘": "'", "’": "'",          # ‘ ’ curly single quotes -> apostrophe
+    "“": '"', "”": '"',          # “ ” curly double quotes -> straight
+    "–": "-", "—": "-", "−": "-",  # – — − en/em dash, minus -> hyphen
+    "…": "...",                        # … ellipsis
+    "•": "*", "✔": "*",           # • ✔ bullet / check -> asterisk
+    " ": " ",                          # non-breaking space -> space
+}
+_TYPO_TABLE = str.maketrans(TYPOGRAPHY)
+
+
+def normalize_typography(text: str) -> str:
+    """Fold typographic Unicode punctuation down to C64-renderable ASCII."""
+    return text.translate(_TYPO_TABLE)
+
+
 def ascii_to_screen(c: str) -> int:
     """ASCII (or PETSCII box glyph) -> C64 screen code (lowercase charset)."""
     if c in BOX_SCREEN:
@@ -474,7 +496,7 @@ def load_topics() -> list[tuple[str, int, list[str | bytes], int]]:
     mdtok = mdbasic_tokens()
     topics = []
     for path in sorted(MANUAL.glob("*.md")):
-        meta, body = split_frontmatter(path.read_text())
+        meta, body = split_frontmatter(normalize_typography(path.read_text()))
         name = meta.get("name", path.stem)
         order = int(meta["order"]) if meta.get("order", "").lstrip("-").isdigit() \
             else _order_from_stem(path.stem)
