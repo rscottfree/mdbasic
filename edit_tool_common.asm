@@ -1,17 +1,17 @@
 ; ***MDBASIC shared in-place BASIC edit tool***
-; A full-screen REPL launched from the CTRL+RESTORE menu (R/M/C). Copied to $c000
+; A full-screen REPL launched from the CTRL+RESTORE menu. Copied to $c000
 ; from its tool bank's $8000 and jumped to by the resident stub; RUN/STOP restores
 ; state, RTSs back to menu.asm, and that shared stub does the single KERNAL NMI tail.
 ;
-;   R [<inc>] [<start>] [<end>] [<dest>]
+;   [<inc>] [<start>] [<end>] [<dest>]
 ;                                -- partial renumber of the lines in the source
 ;                                   range, updating GOTO/GOSUB/ON/THEN/RUN/RESTORE/
 ;                                   RESUME/ELSE/ERRL= references in place. The new
 ;                                   numbering starts at <dest> if given, else <start>
 ;                                   (or <inc> if <start> is also omitted).
-;   M <start> <end> <dest>       -- move+renumber a block, update its external
+;   <start> <end> <dest>         -- move+renumber a block, update its external
 ;                                   references, and relocate it to sorted order.
-;   C <start> <end> <dest>       -- copy a block to a new, non-overlapping
+;   <start> <end> <dest>         -- copy a block to a new, non-overlapping
 ;                                   destination (the destination range must not
 ;                                   overlap any existing line, including the
 ;                                   source range itself). Internal references
@@ -34,6 +34,8 @@
 ; Screen/cursor/blink state is saved exactly once, by menu_body.asm, before this
 ; tool is ever copied to $c000 (see menu.asm's runmenu) -- this tool only
 ; restores it on exit, via the shared SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN handoff.
+; Input stays raw GETIN, but a solid reverse-space cursor is drawn at the
+; insertion point so the prompt reads like an active field.
 
 ; --- zero page / kernal / ROM ---
 R6510    = $01
@@ -59,6 +61,7 @@ BAD      = $0100      ;FOUT string work area (new-number ASCII lands here)
 NMIVEC   = $0318
 HIBASE   = $0288
 SCREEN   = $0400
+RVS_SPACE = $a0
 SCROLY   = $d011
 VMCSB    = $d018
 CI2PRA   = $dd00
@@ -261,6 +264,7 @@ rs_cp
 readline
  lda #0
  sta bufi
+ jsr showcursor
 rl_lp
  jsr GETIN
  beq rl_lp
@@ -282,18 +286,25 @@ rl_ok
  ldx bufi
  cpx #38
  bcs rl_lp            ;buffer full
+ pha
+ jsr hidecursor
+ pla
  sta inbuf,x
  jsr CHROUT           ;echo
  inc bufi
+ jsr showcursor
  jmp rl_lp
 rl_del
  lda bufi
  beq rl_lp
+ jsr hidecursor
  dec bufi
  lda #$14
  jsr CHROUT           ;erase on screen
+ jsr showcursor
  jmp rl_lp
 rl_done
+ jsr hidecursor
  lda #$0d
  jsr CHROUT
  ldx bufi
@@ -303,6 +314,18 @@ rl_done
  rts
 rl_stop
  sec
+ rts
+
+showcursor
+ ldy PNTR
+ lda #RVS_SPACE
+ sta (PNT),y
+ rts
+
+hidecursor
+ ldy PNTR
+ lda #$20
+ sta (PNT),y
  rts
 
 ;==================== command parse / dispatch ====================
@@ -315,23 +338,17 @@ exec
  lda inbuf,x
 .ifdef TOOL_RENUM
  beq ex_done          ;empty line -> nothing
- cmp #"r"             ;lowercase literal = PETSCII $52 = the unshifted 'R' key
- beq ex_renum
- jmp ex_renum_args    ;bare args are accepted in the single-command tool
+ jmp ex_renum_args
 .endif
 .ifdef TOOL_MOVE
  cmp #0
  beq ex_done          ;empty line -> nothing
- cmp #"m"
- beq ex_move
- jmp ex_move_args     ;bare args are accepted in the single-command tool
+ jmp ex_move_args
 .endif
 .ifdef TOOL_COPY
  cmp #0
  beq ex_done          ;empty line -> nothing
- cmp #"c"
- beq ex_copy
- jmp ex_copy_args     ;bare args are accepted in the single-command tool
+ jmp ex_copy_args
 .endif
  lda #1
  sta resultcode       ;?SYNTAX
@@ -339,8 +356,6 @@ ex_done
  rts
 
 .ifdef TOOL_RENUM
-ex_renum
- inx                  ;skip R
 ex_renum_args
  lda #0
  sta op
@@ -396,8 +411,6 @@ erun
 .endif
 
 .ifdef TOOL_MOVE
-ex_move
- inx                  ;skip M
 ex_move_args
  lda #1
  sta op
@@ -427,8 +440,6 @@ ex_syn
  rts
 
 .ifdef TOOL_COPY
-ex_copy
- inx                  ;skip C
 ex_copy_args
  lda #2
  sta op
@@ -1909,17 +1920,43 @@ hdrtxt
 .ifdef TOOL_RENUM
  .text "mdbasic renumber"
  .byte $0d
- .text "r [inc] [start] [end] [dest]"
+ .text "renumber lines and fix line refs."
+ .byte $0d
+ .text "syntax: <inc> <start> <end> <dest>"
+ .byte $0d
+ .text "<inc>   line increment (default 10)"
+ .byte $0d
+ .text "<start> first source line"
+ .byte $0d
+ .text "<end>   last source line"
+ .byte $0d
+ .text "<dest>  first new line number"
 .endif
 .ifdef TOOL_MOVE
  .text "mdbasic move"
  .byte $0d
- .text "m start end dest"
+ .text "move a block and fix line refs."
+ .byte $0d
+ .text "syntax: <start> <end> <dest>"
+ .byte $0d
+ .text "<start>: first source line"
+ .byte $0d
+ .text "<end>:   last source line"
+ .byte $0d
+ .text "<dest>:  first new line number"
 .endif
 .ifdef TOOL_COPY
  .text "mdbasic copy"
  .byte $0d
- .text "c start end dest"
+ .text "copy a block and retarget refs."
+ .byte $0d
+ .text "syntax: <start> <end> <dest>"
+ .byte $0d
+ .text "<start>: first source line"
+ .byte $0d
+ .text "<end>:   last source line"
+ .byte $0d
+ .text "<dest>:  first new line number"
 .endif
  .byte $0d
  .text "run/stop = exit"

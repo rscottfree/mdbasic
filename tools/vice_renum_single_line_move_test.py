@@ -38,7 +38,7 @@ def session_single_move(crt, dorenum, domenu, next_port):
         s.close()
         lib.type_lines(port, prog)
         lib.open_tool(port, lib.DOMOVE)
-        lib.cmd(port, "M 200 200 50")
+        lib.cmd(port, "200 200 50")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["single_move_ok"] = "OK" in txt

@@ -50,7 +50,7 @@ def session_move_overlap(crt, dorenum, domenu, next_port):
 
         # Source block [5,7] covers lines 5 and 7 (minsrc=5, maxsrc=7); dest=2
         # -> shifted range [2,4], which contains the kept line 3.
-        lib.cmd(port, "M 5 7 2")
+        lib.cmd(port, "5 7 2")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["overlap_rejected_msg"] = "COLLISION" in txt
@@ -59,7 +59,7 @@ def session_move_overlap(crt, dorenum, domenu, next_port):
 
         # Sanity: the REPL is still open and a legitimate move now succeeds,
         # proving the rejection didn't wedge the tool.
-        lib.cmd(port, "M 5 7 10")
+        lib.cmd(port, "5 7 10")
         s = harness.connect_monitor(port, 20.0)
         txt2 = harness.screen_text(s).upper()
         results["followup_move_ok"] = "OK" in txt2

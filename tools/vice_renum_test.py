@@ -42,6 +42,11 @@ import vice_docs_test as dt
 import renum_test_lib as lib
 
 
+def cursor_cells(sock):
+    screen = harness.mem_get(sock, 0x0400, 0x07FF)
+    return [i for i, b in enumerate(screen) if b == 0xA0]
+
+
 def session_menu_choice(crt, dorenum, domenu, next_port):
     """the menu-body itself (F1 -> pager, R/M/C -> edit tools). SYS to `domenu`
     (past the CTRL/STOP gate); the menu-body draws its prompt and waits for a
@@ -118,7 +123,7 @@ def session_renum_basic(crt, dorenum, domenu, next_port):
         s = harness.connect_monitor(port, 20.0)
         results["tool_opens"] = "RENUM" in harness.screen_text(s).upper()
         s.close()
-        lib.cmd(port, "R 100")                   # increment 100 -> 100,200,300,400,500
+        lib.cmd(port, "100")                     # increment 100 -> 100,200,300,400,500
         s = harness.connect_monitor(port, 20.0)
         results["repl_ok"] = "OK" in harness.screen_text(s).upper()
         s.close()
@@ -154,7 +159,7 @@ def session_move_basic(crt, dorenum, domenu, next_port):
         s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
         lib.type_lines(port, prog2)
         lib.open_tool(port, lib.DOMOVE)
-        lib.cmd(port, "M 150 210 15")
+        lib.cmd(port, "150 210 15")
         s = harness.connect_monitor(port, 20.0)
         results["move_ok"] = "OK" in harness.screen_text(s).upper()
         s.close()
@@ -194,14 +199,14 @@ def session_reject(crt, dorenum, domenu, next_port):
         s.close()
         lib.open_tool(port, lib.DOMOVE)
         # end <= start
-        lib.cmd(port, "M 30 20 500")
+        lib.cmd(port, "30 20 500")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["reject_endstart_msg"] = "END<START" in txt
         results["reject_endstart_id"] = lib.read_prog(s) == before
         s.close()
         # move collision: block [100,110] -> [15,25] interleaves kept line 20
-        lib.cmd(port, "M 100 110 15")
+        lib.cmd(port, "100 110 15")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["reject_coll_msg"] = "COLLISION" in txt
@@ -210,15 +215,15 @@ def session_reject(crt, dorenum, domenu, next_port):
         harness.keyboard_type_on_port(port, "\x03")
         time.sleep(0.6)
         lib.open_tool(port, dorenum)
-        # renum overflow: R 40000 100 -> 100, 40100(collision-free) then next >63999
-        lib.cmd(port, "R 40000 10")
+        # renum overflow: 40000 10 -> 10, 40010(collision-free) then next >63999
+        lib.cmd(port, "40000 10")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["reject_over_msg"] = ">63999" in txt
         results["reject_over_id"] = lib.read_prog(s) == before
         s.close()
         # tool still open (REPL) -> a valid command now applies
-        lib.cmd(port, "R 500")
+        lib.cmd(port, "500")
         s = harness.connect_monitor(port, 20.0)
         results["repl_stays"] = "OK" in harness.screen_text(s).upper()
         after = lib.read_prog(s)
@@ -245,7 +250,7 @@ def session_shrink(crt, dorenum, domenu, next_port):
         s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
         lib.type_lines(port, prog4)
         lib.open_tool(port, dorenum)
-        lib.cmd(port, "R 5")                     # -> 5,10,15,20 ; GOTO 1000 -> GOTO 15
+        lib.cmd(port, "5")                       # -> 5,10,15,20 ; GOTO 1000 -> GOTO 15
         s = harness.connect_monitor(port, 20.0)
         results["shrink_ok"] = "OK" in harness.screen_text(s).upper()
         s.close()
@@ -286,7 +291,7 @@ def session_big(crt, dorenum, domenu, next_port):
         results["big_before_links"] = lib.walk_links(s) is not None
         s.close()
         lib.open_tool(port, dorenum)
-        lib.cmd(port, "R 1")          # 1..10 : all headers + refs shrink 4->1 digit
+        lib.cmd(port, "1")            # 1..10 : all headers + refs shrink 4->1 digit
         s = harness.connect_monitor(port, 20.0)
         results["big_ok"] = "OK" in harness.screen_text(s).upper()
         s.close()
@@ -344,6 +349,55 @@ def session_screen_backup(crt, dorenum, domenu, next_port):
     return results
 
 
+def session_cursor(crt, dorenum, domenu, next_port):
+    """the tool draws a solid reverse-space cursor that tracks typing/deletion
+    and clears from the submitted line before the next prompt appears."""
+    results = {}
+    port = next_port()
+    proc = lib.boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        lib.open_tool(port, dorenum)
+
+        s = harness.connect_monitor(port, 20.0)
+        cur0 = cursor_cells(s)
+        s.close()
+        results["cursor_initial"] = len(cur0) == 1
+
+        harness.keyboard_type_on_port(port, "12")
+        time.sleep(0.4)
+        s = harness.connect_monitor(port, 20.0)
+        cur1 = cursor_cells(s)
+        s.close()
+        results["cursor_moves_forward"] = (len(cur0) == 1 and len(cur1) == 1
+                                            and cur1[0] == cur0[0] + 2)
+
+        harness.keyboard_type_on_port(port, "\x14")
+        time.sleep(0.4)
+        s = harness.connect_monitor(port, 20.0)
+        cur2 = cursor_cells(s)
+        s.close()
+        results["cursor_moves_back"] = (len(cur0) == 1 and len(cur2) == 1
+                                         and cur2[0] == cur0[0] + 1)
+
+        harness.keyboard_type_on_port(port, "\r")
+        time.sleep(0.8)
+        s = harness.connect_monitor(port, 20.0)
+        screen = harness.mem_get(s, 0x0400, 0x07FF)
+        cur3 = cursor_cells(s)
+        s.close()
+        results["cursor_old_cell_cleared"] = (len(cur2) == 1 and screen[cur2[0]] == 0x20)
+        results["cursor_next_prompt"] = (len(cur2) == 1 and len(cur3) == 1
+                                          and cur3[0] > cur2[0])
+
+        harness.keyboard_type_on_port(port, "\x03")
+        time.sleep(0.6)
+        harness.quit_vice(harness.connect_monitor(port, 20.0))
+    finally:
+        lib.finish_on_port(proc, port)
+    return results
+
+
 def session_dest_anchor(crt, dorenum, domenu, next_port):
     """R with explicit <dest> anchors the new numbering there.
     10 PRINT"A" / 20 PRINT"B" / 30 PRINT"C"
@@ -357,7 +411,7 @@ def session_dest_anchor(crt, dorenum, domenu, next_port):
         s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
         lib.type_lines(port, prog7)
         lib.open_tool(port, dorenum)
-        lib.cmd(port, "R 5 10 30 1000")
+        lib.cmd(port, "5 10 30 1000")
         s = harness.connect_monitor(port, 20.0)
         results["dest_ok"] = "OK" in harness.screen_text(s).upper()
         s.close()
@@ -394,13 +448,13 @@ def session_copy_basic(crt, dorenum, domenu, next_port):
         before = lib.read_prog(s)
         s.close()
         lib.open_tool(port, lib.DOCOPY)
-        lib.cmd(port, "C 100 120 110")
+        lib.cmd(port, "100 120 110")
         s = harness.connect_monitor(port, 20.0)
         txt = harness.screen_text(s).upper()
         results["copy_reject_coll_msg"] = "COLLISION" in txt
         results["copy_reject_coll_id"] = lib.read_prog(s) == before
         s.close()
-        lib.cmd(port, "C 100 120 200")
+        lib.cmd(port, "100 120 200")
         s = harness.connect_monitor(port, 20.0)
         results["copy_ok"] = "OK" in harness.screen_text(s).upper()
         nums = lib.walk_links(s)
@@ -431,6 +485,7 @@ TESTS = [
     ("shrink", session_shrink),
     ("big", session_big),
     ("screen_backup", session_screen_backup),
+    ("cursor", session_cursor),
     ("dest_anchor", session_dest_anchor),
     ("copy_basic", session_copy_basic),
 ]
