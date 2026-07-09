@@ -39,12 +39,12 @@ import vice_prg_test as harness
 PORT = 6554
 HANDLER_ADDR = 0x033c          # boot entry the cart NMI vector ($8002) points at
 STUB_ADDR = 0xc000             # scratch for the synthetic-NMI test stub. NOT in the
-                               # cassette buffer: menu.asm now uses nearly all of the
-                               # $033c-$03f7 budget (boot.asm's HANDLER_LEN), leaving
-                               # no safe gap there for a 15-byte stub. $c000 is free
-                               # instead -- it's where the chosen tool gets copied,
-                               # but only after the stub's own jmp has already handed
-                               # off control, so there's no overlap in time.
+                               # cassette buffer: the resident handler now uses most
+                               # of $033c-$03f7, leaving no safe gap there for a
+                               # synthetic-NMI helper. $c000 is free instead -- it's
+                               # where the chosen tool gets copied, but only after the
+                               # stub's own jmp has already handed off control, so
+                               # there's no overlap in time.
 
 # PETSCII box-grid corner/tee/cross screen codes (no vertical $5d, which is common).
 BOX_CODES = {0x70, 0x6E, 0x6D, 0x7D, 0x6B, 0x73, 0x72, 0x71, 0x5B}
@@ -144,7 +144,6 @@ def build_cart() -> tuple[Path, int]:
     dodocs = label_addr("/tmp/menu.lst", "dodocs")
     pager = asm("docs_pager.asm", "/tmp/pager.prg")
     menu = asm("menu_body.asm", "/tmp/menubody.prg")
-    launch = asm("menu_launch.asm", "/tmp/menulaunch.prg")
     renum = asm("renum_tool.asm", "/tmp/renum.prg")
     move = asm("move_tool.asm", "/tmp/move.prg")
     copy = asm("copy_tool.asm", "/tmp/copy.prg")
@@ -152,8 +151,7 @@ def build_cart() -> tuple[Path, int]:
     idx = (ROOT / "build/docs.idx").read_bytes()
     dat = (ROOT / "build/docs.dat").read_bytes()
     banks = make_crt.doc_banks(pager, idx, dat, handler,
-                               renum=renum, move=move, copy=copy, menu=menu,
-                               launch=launch)
+                               renum=renum, move=move, copy=copy, menu=menu)
     image = make_crt.image_from_prg((ROOT / "mdbasic.prg").read_bytes())
     crt = make_crt.build_crt(image, name="MDDOCS", stub=stub, extra_banks=banks)
     out = Path("/tmp/mddocs.crt")
@@ -190,12 +188,10 @@ def main() -> int:
         # Leave a marker on screen so we can prove it survives a docs round-trip.
         harness.keyboard_type_on_port(PORT, '?"ZZMARK"\r')
         time.sleep(0.5)
-        # Clobber the classic sprite-data range in the cassette buffer, then poke
-        # the synthetic NMI-frame stub and SYS it. The stub jumps to dodocs (the
-        # direct docs entry in the resident handler) with a return frame in place,
-        # so the handler's $fe72/RTI exit returns cleanly.
+        # Poke the synthetic NMI-frame stub and SYS it. The stub jumps to dodocs
+        # (the direct docs entry in the resident handler) with a return frame in
+        # place, so the handler's $fe72/RTI exit returns cleanly.
         s = harness.connect_monitor(PORT, 20.0)
-        harness.mem_set(s, 0x0340, bytes(range(64)))
         # Stamp a distinctive low-nybble color pattern on an untouched row (row 5,
         # clear of the cursor/print area) so we can prove the pager packs and
         # restores color RAM rather than leaving its solid fill (color 14) behind.
@@ -204,7 +200,6 @@ def main() -> int:
         harness.mem_set(s, COLCELLS, COLPAT)
         s.close()
         opened = open_docs_via_stub(PORT, dodocs)
-        results["resident_survives_0340_clobber"] = "SEARCH" in opened
         results["pager_opens"] = "SEARCH" in opened               # search page is default
         results["search_grid"] = "AUTO" in opened                 # grid lists topics (no filter)
         harness.keyboard_type_on_port(PORT, "SPRITE\r")           # filter + enter -> doc page

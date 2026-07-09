@@ -5,8 +5,8 @@
 ; JSRs it (see docs-pager design). Assembled for $c000 (run location).
 ;
 ;   on entry: bank 3 paged in only long enough for the hook's code copy.
-;   on exit:  cart paged out, NMI/cursor/$01 restored, screen cleared, then the
-;             KERNAL NMI tail RTIs back to the interrupted editor.
+;   on exit:  cart paged out, NMI/cursor/$01 restored, screen cleared if needed,
+;             then RTS back to menu.asm for the single shared KERNAL NMI tail.
 ;
 ; Pager opens on a SEARCH page (mode=0). The user types to filter the keyword
 ; grid, presses ENTER to open a help page (mode=1), and F2 to toggle between
@@ -498,7 +498,7 @@ exdone
  sta U64SPEED        ;restore the Ultimate 64 turbo speed bits
  lda SAV01
  sta R6510
- jmp NMIRTI
+ rts
 
 nmistub
  rti                 ;neutralise RESTORE while a cart bank is paged in

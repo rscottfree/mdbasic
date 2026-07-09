@@ -1,7 +1,7 @@
 ; ***MDBASIC shared in-place BASIC edit tool***
 ; A full-screen REPL launched from the CTRL+RESTORE menu (R/M/C). Copied to $c000
-; from its tool bank's $8000 and jumped to by the launcher; RUN/STOP exits
-; straight through the KERNAL NMI tail back into the editor.
+; from its tool bank's $8000 and jumped to by the resident stub; RUN/STOP restores
+; state, RTSs back to menu.asm, and that shared stub does the single KERNAL NMI tail.
 ;
 ;   R [<inc>] [<start>] [<end>] [<dest>]
 ;                                -- partial renumber of the lines in the source
@@ -193,7 +193,7 @@ texit
  sta BLNCT            ;blink almost immediately
  lda SAV01
  sta R6510
- jmp NMIRTI
+ rts
 tblank
  jsr forcetext
  sei                  ;mask the blink IRQ across the clear + cursor reset (U64 race,
@@ -207,7 +207,7 @@ tblank
  sta BLNON
  lda SAV01
  sta R6510
- jmp NMIRTI
+ rts
 
 nmistub
  rti
