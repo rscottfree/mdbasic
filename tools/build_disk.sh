@@ -83,6 +83,7 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     RENUM="$OUTDIR/renum_tool.bin"
     MOVE="$OUTDIR/move_tool.bin"
     COPY="$OUTDIR/copy_tool.bin"
+    CONVERT="$OUTDIR/convert_tool.bin"
     tmpx -i "$ROOT/docs_pager.asm" -o "$OUTDIR/docs_pager.prg" >/dev/null
     tail -c +3 "$OUTDIR/docs_pager.prg" > "$PAGER"
     tmpx -i "$ROOT/menu.asm" -o "$OUTDIR/menu.prg" >/dev/null
@@ -95,9 +96,11 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     tail -c +3 "$OUTDIR/move_tool.prg" > "$MOVE"
     tmpx -i "$ROOT/copy_tool.asm" -o "$OUTDIR/copy_tool.prg" >/dev/null
     tail -c +3 "$OUTDIR/copy_tool.prg" > "$COPY"
+    tmpx -i "$ROOT/convert_tool.asm" -o "$OUTDIR/convert_tool.prg" >/dev/null
+    tail -c +3 "$OUTDIR/convert_tool.prg" > "$CONVERT"
     python3 "$ROOT/tools/build_docs.py" --pack "$OUTDIR/docs.bin" >/dev/null
-    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --move $MOVE --copy $COPY --menu $MENUBODY"
-    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + tools R/M/C $(wc -c <"$RENUM")/$(wc -c <"$MOVE")/$(wc -c <"$COPY") B"
+    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --move $MOVE --copy $COPY --convert $CONVERT --menu $MENUBODY"
+    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + tools R/M/C/F7 $(wc -c <"$RENUM")/$(wc -c <"$MOVE")/$(wc -c <"$COPY")/$(wc -c <"$CONVERT") B"
 else
     echo "Skipping docs: mdbasic.pdf or pdftotext not available"
 fi

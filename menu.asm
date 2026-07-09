@@ -1,6 +1,7 @@
 ; ***MDBASIC CTRL+RESTORE utility menu -- $033c stub***
 ; Freeze-cartridge style trigger: pressing CTRL+RESTORE shows a tiny function-key
-; menu that launches the docs pager (F1) or the renumber/move/copy tools (R/M/C).
+; menu that launches the docs pager (F1), the renumber/move/copy tools (R/M/C),
+; or the convert tool (F7).
 ;
 ; The boot loader copies this stub from cart bank 3 ($9800) to $033c (cassette
 ; buffer), stashes the image's original runstp (RESTORE/NMI) address at REALGONE,
@@ -10,7 +11,7 @@
 ; disturb running programs.
 ;
 ;   CTRL + RESTORE       -> show the utility menu (F1 docs, R renumber,
-;                           M move, C copy,
+;                           M move, C copy, F7 convert,
 ;                           RUN/STOP dismisses).
 ;   RESTORE alone        -> the original runstp behaviour (editor-mode reset).
 ;   RUN/STOP + RESTORE   -> the original runstp behaviour (break), via REALGONE.
@@ -35,8 +36,9 @@
 ; (which skip the UI) still need the save to happen, so they set SAVEONLY=1 and
 ; menu_body just snapshots and returns immediately.
 ;
-; make_crt.py patches `toolbanks` (fixed offsets 3..5, right after the opening
-; JMP) with the actual R/M/C tool bank numbers, which vary with doc-data count.
+; make_crt.py patches `toolbanks` (fixed offsets 3..6, right after the opening
+; JMP) with the actual R/M/C/convert tool bank numbers, which vary with the
+; doc-data count.
 
 R6510    = $01
 CART     = $de00
@@ -57,12 +59,13 @@ SAVEONLY = $0e        ;shared flag read by menu_body.asm's `start`: 0 = show the
                       ;full F1/R/M/C/STOP UI (domenu); nonzero = skip the UI and
                       ;just save screen/cursor/blink state, then return (dodocs/
                       ;dorenum). Also safe during this NMI -- see SRCZP above.
-CHOICE   = $0f        ;direct-entry choice for tests (1 docs, 2 R, 3 M, 4 C)
+CHOICE   = $0f        ;direct-entry choice for tests (1 docs, 2 R, 3 M, 4 C,
+                      ;5 convert)
 
 *=$033c
 
  jmp start
-toolbanks .byte $ff,$ff,$ff ;offsets 3..5: RENUM/MOVE/COPY banks, patched by make_crt.py
+toolbanks .byte $ff,$ff,$ff,$ff ;offsets 3..6: RENUM/MOVE/COPY/CONVERT banks, patched by make_crt.py
 
 start
  jsr SCNSTOP          ;scan keyboard for STOP
@@ -90,6 +93,9 @@ domove
  bne direct
 docopy
  lda #4
+ bne direct
+doconvert
+ lda #5
 direct
  sta CHOICE
  lda R6510
@@ -119,7 +125,7 @@ dispatch
  sec
  sbc #2
  tax
- lda toolbanks,x      ;2/3/4 -> renumber/move/copy bank
+ lda toolbanks,x      ;2/3/4/5 -> renumber/move/copy/convert bank
  ldx #12              ;12 pages = 3K, leaves SCRBUF at $cc00 intact
  bne launchtool
 lpager

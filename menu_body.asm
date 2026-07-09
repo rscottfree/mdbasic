@@ -6,13 +6,14 @@
 ;
 ; It runs in one of two modes selected by SAVEONLY:
 ;
-;   SAVEONLY = 0 (the real CTRL+RESTORE path): draws five menu lines
+;   SAVEONLY = 0 (the real CTRL+RESTORE path): draws six menu lines
 ;   (one item per row) at the top of the screen with the blinking cursor
 ;   disabled (this is a GETIN read loop, not the screen editor -- there's no
 ;   real cursor to blink), reads one key, and returns the choice in X: 0 =
-;   dismiss, 1 = docs pager, 2 = renumber, 3 = move, 4 = copy. On dismiss it
-;   restores the screen/cursor/blink itself; on F1/R/M/C it leaves the saved
-;   pre-menu state intact for the dispatched tool's own exit to restore.
+;   dismiss, 1 = docs pager, 2 = renumber, 3 = move, 4 = copy, 5 = convert.
+;   On dismiss it restores the screen/cursor/blink itself; on F1/R/M/C/F7 it
+;   leaves the saved pre-menu state intact for the dispatched tool's own exit
+;   to restore.
 ;
 ;   SAVEONLY != 0 (dodocs/dorenum/domove/docopy in menu.asm): skips the UI and
 ;   just takes the snapshot, then returns immediately so the chosen tool still
@@ -54,7 +55,9 @@ ROW1     = $0428      ;row 1
 ROW2     = $0450      ;row 2
 ROW3     = $0478      ;row 3
 ROW4     = $04a0      ;row 4
+ROW5     = $04c8      ;row 5
 KEY_F1   = $85
+KEY_F7   = $88
 KEY_R    = "r"
 KEY_M    = "m"
 KEY_C    = "c"
@@ -145,6 +148,13 @@ draw5
  sta ROW4,x
  dex
  bpl draw5
+ ldx #PROMPT6LEN-1
+draw6
+ lda prompt6,x
+ and #$3f
+ sta ROW5,x
+ dex
+ bpl draw6
  cli                  ;let the kernal IRQ scan the keyboard for GETIN
 keyloop
  jsr GETIN
@@ -159,6 +169,9 @@ keyloop
  beq chosen
  ldx #4
  cmp #KEY_C
+ beq chosen
+ ldx #5
+ cmp #KEY_F7
  beq chosen
  ldx #0
  cmp #KEY_STOP
@@ -281,7 +294,9 @@ prompt3 .text "M=MOVE"
 PROMPT3LEN = *-prompt3
 prompt4 .text "C=COPY"
 PROMPT4LEN = *-prompt4
-prompt5 .text "STOP=QUIT"
+prompt5 .text "F7=CONVERT"
 PROMPT5LEN = *-prompt5
+prompt6 .text "STOP=QUIT"
+PROMPT6LEN = *-prompt6
 svkey .word 0
 svchoice .byte 0

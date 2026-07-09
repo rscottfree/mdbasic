@@ -99,12 +99,13 @@ def _cart_header(name: str) -> bytearray:
 
 def doc_banks(pager: bytes, index: bytes, data: bytes, handler: bytes = b"",
               renum: bytes = b"", move: bytes = b"", copy: bytes = b"",
+              convert: bytes = b"",
               menu: bytes = b"") -> list[bytes]:
     """Compose the cart banks: bank 3 = pager+index+handler, banks 4+ = doc data,
-    and (if tools/menu are given) three final tool banks: renumber, move, copy.
-    The first tool bank also carries menu-body at $9800. Tool bank numbers depend
-    on the doc-data bank count, so the first tool bank number is patched into the
-    resident handler here."""
+    and (if tools/menu are given) four final tool banks: renumber, move, copy,
+    convert. The first tool bank also carries menu-body at $9800. Tool bank
+    numbers depend on the doc-data bank count, so the first tool bank number is
+    patched into the resident handler here."""
     if len(pager) > PAGER_MAX:
         raise ValueError(f"pager {len(pager)} bytes exceeds {PAGER_MAX}")
     if len(index) > HANDLER_OFF - INDEX_OFF:
@@ -121,10 +122,11 @@ def doc_banks(pager: bytes, index: bytes, data: bytes, handler: bytes = b"",
     data_banks = [data[i:i + BANK_SIZE] for i in range(0, len(data), BANK_SIZE)]
 
     tool_banks = []
-    if renum or move or copy or menu:
-        if not (renum and move and copy and menu):
-            raise ValueError("renum, move, copy and menu must be given together")
-        for name, tool in (("renum", renum), ("move", move), ("copy", copy)):
+    if renum or move or copy or convert or menu:
+        if not (renum and move and copy and convert and menu):
+            raise ValueError("renum, move, copy, convert and menu must be given together")
+        for name, tool in (("renum", renum), ("move", move),
+                           ("copy", copy), ("convert", convert)):
             if len(tool) > TOOL_MAX:
                 raise ValueError(f"{name} tool {len(tool)} bytes exceeds {TOOL_MAX} "
                                  f"runtime copy limit ($c000-$cbff)")
@@ -133,10 +135,11 @@ def doc_banks(pager: bytes, index: bytes, data: bytes, handler: bytes = b"",
         # Tool banks are appended after bank3 + doc data.
         first_tool_bank = NUM_BANKS + 1 + len(data_banks)
         handler = bytearray(handler)
-        handler[TOOLBANKS_OFF:TOOLBANKS_OFF + 3] = bytes([
-            first_tool_bank, first_tool_bank + 1, first_tool_bank + 2])
+        handler[TOOLBANKS_OFF:TOOLBANKS_OFF + 4] = bytes([
+            first_tool_bank, first_tool_bank + 1,
+            first_tool_bank + 2, first_tool_bank + 3])
         handler = bytes(handler)
-        for i, tool in enumerate((renum, move, copy)):
+        for i, tool in enumerate((renum, move, copy, convert)):
             tb = bytearray(b"\x00" * BANK_SIZE)
             tb[0:len(tool)] = tool
             if i == 0:
@@ -208,6 +211,7 @@ def main() -> int:
     parser.add_argument("--renum", type=Path, help="renumber tool binary (raw, for $c000)")
     parser.add_argument("--move", type=Path, help="move tool binary (raw, for $c000)")
     parser.add_argument("--copy", type=Path, help="copy tool binary (raw, for $c000)")
+    parser.add_argument("--convert", type=Path, help="convert tool binary (raw, for $c000)")
     parser.add_argument("--menu", type=Path, help="menu-body UI binary (raw, for $c000)")
     args = parser.parse_args()
 
@@ -216,16 +220,18 @@ def main() -> int:
     if any(docs_args):
         if not all(docs_args):
             parser.error("--pager, --index, --data and --handler must be given together")
-        renum_args = (args.renum, args.move, args.copy, args.menu)
+        renum_args = (args.renum, args.move, args.copy, args.convert, args.menu)
         if any(renum_args) and not all(renum_args):
-            parser.error("--renum, --move, --copy and --menu must be given together")
+            parser.error("--renum, --move, --copy, --convert and --menu must be given together")
         renum = args.renum.read_bytes() if args.renum else b""
         move = args.move.read_bytes() if args.move else b""
         copy = args.copy.read_bytes() if args.copy else b""
+        convert = args.convert.read_bytes() if args.convert else b""
         menu = args.menu.read_bytes() if args.menu else b""
         extra = doc_banks(args.pager.read_bytes(), args.index.read_bytes(),
                           args.data.read_bytes(), args.handler.read_bytes(),
-                          renum=renum, move=move, copy=copy, menu=menu)
+                          renum=renum, move=move, copy=copy, convert=convert,
+                          menu=menu)
 
     image = image_from_prg(args.prg.read_bytes())
     crt = build_crt(image, name=args.name, stub=args.stub.read_bytes(),

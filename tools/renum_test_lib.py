@@ -29,6 +29,7 @@ import vice_docs_test as dt
 BASEPORT = 6760
 DOMOVE = None
 DOCOPY = None
+DOCONVERT = None
 
 
 def boot(port, crt):
@@ -113,13 +114,14 @@ def run_cli(registry: list[tuple[str, callable]], argv: list[str]) -> int:
         selected = registry
 
     crt, _dodocs = dt.build_cart()
-    global DOMOVE, DOCOPY
+    global DOMOVE, DOCOPY, DOCONVERT
     dorenum = dt.label_addr("/tmp/menu.lst", "dorenum")
     DOMOVE = dt.label_addr("/tmp/menu.lst", "domove")
     DOCOPY = dt.label_addr("/tmp/menu.lst", "docopy")
+    DOCONVERT = dt.label_addr("/tmp/menu.lst", "doconvert")
     domenu = dt.label_addr("/tmp/menu.lst", "domenu")
     print(f"dorenum=${dorenum:04x} domove=${DOMOVE:04x} "
-          f"docopy=${DOCOPY:04x} domenu=${domenu:04x}")
+          f"docopy=${DOCOPY:04x} doconvert=${DOCONVERT:04x} domenu=${domenu:04x}")
 
     port_iter = iter(range(BASEPORT, BASEPORT + 1000))
     next_port = lambda: next(port_iter)

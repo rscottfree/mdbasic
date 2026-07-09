@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end test of the MDBASIC CTRL+RESTORE renumber/move/copy tools in VICE.
+"""End-to-end test of the MDBASIC CTRL+RESTORE renumber/move/copy/convert tools in VICE.
 
 Builds the full docs+menu+tool cart (reusing vice_docs_test.build_cart), boots
 it, types a known BASIC program, then SYSes a synthetic-NMI stub that jumps to the
@@ -48,14 +48,15 @@ def cursor_cells(sock):
 
 
 def session_menu_choice(crt, dorenum, domenu, next_port):
-    """the menu-body itself (F1 -> pager, R/M/C -> edit tools). SYS to `domenu`
+    """the menu-body itself (F1 -> pager, R/M/C/F7 -> tools). SYS to `domenu`
     (past the CTRL/STOP gate); the menu-body draws its prompt and waits for a
     key. Poked keys in the kernal buffer drive each choice."""
     results = {}
     for key, want, tag in (("\x85", "SEARCH", "menu_f1_pager"),
                             ("r", "RENUMBER", "menu_r_renum"),
                             ("m", "MOVE", "menu_m_move"),
-                            ("c", "COPY", "menu_c_copy")):
+                            ("c", "COPY", "menu_c_copy"),
+                            ("\x88", "CONVERT", "menu_f7_convert")):
         port = next_port()
         proc = lib.boot(port, crt)
         try:
@@ -476,6 +477,44 @@ def session_copy_basic(crt, dorenum, domenu, next_port):
     return results
 
 
+def session_convert_basic(crt, dorenum, domenu, next_port):
+    """convert accepts valid input, rejects bad input, and stays in the REPL.
+    Decimal 255 should print %11111111 / @377 / $FF. Invalid %102 should print
+    ?INVALID, and a follow-up hex conversion should still work."""
+    results = {}
+    port = next_port()
+    proc = lib.boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        lib.open_tool(port, lib.DOCONVERT)
+        s = harness.connect_monitor(port, 20.0)
+        results["convert_opens"] = "CONVERT" in harness.screen_text(s).upper()
+        s.close()
+        lib.cmd(port, "255")
+        s = harness.connect_monitor(port, 20.0)
+        txt = harness.screen_text(s).upper()
+        s.close()
+        results["convert_dec_bin"] = "%11111111" in txt
+        results["convert_dec_oct"] = ".377" in txt
+        results["convert_dec_hex"] = "$FF" in txt
+        lib.cmd(port, "%102")
+        s = harness.connect_monitor(port, 20.0)
+        txt = harness.screen_text(s).upper()
+        s.close()
+        results["convert_invalid"] = "?INVALID" in txt
+        lib.cmd(port, "$2A")
+        s = harness.connect_monitor(port, 20.0)
+        txt = harness.screen_text(s).upper()
+        s.close()
+        results["convert_repl_stays"] = ("%101010" in txt and ".52" in txt and "42" in txt)
+        harness.keyboard_type_on_port(port, "\x03")
+        time.sleep(0.6)
+        harness.quit_vice(harness.connect_monitor(port, 20.0))
+    finally:
+        lib.finish_on_port(proc, port)
+    return results
+
+
 TESTS = [
     ("menu_choice", session_menu_choice),
     ("menu_screen", session_menu_screen),
@@ -488,6 +527,7 @@ TESTS = [
     ("cursor", session_cursor),
     ("dest_anchor", session_dest_anchor),
     ("copy_basic", session_copy_basic),
+    ("convert_basic", session_convert_basic),
 ]
 
 # Union in the sibling files' registries so this one entry point can run the
