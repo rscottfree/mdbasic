@@ -76,7 +76,7 @@ def session_move_overlap(crt, dorenum, domenu, next_port):
                                         and "3 PRINT" in lst)
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 

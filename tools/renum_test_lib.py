@@ -90,9 +90,11 @@ def walk_links(sock):
 
 
 def finish(proc):
-    proc.terminate()
-    try: proc.wait(timeout=5)
-    except Exception: proc.kill()
+    harness.shutdown_vice(proc)
+
+
+def finish_on_port(proc, port):
+    harness.shutdown_vice_on_port(proc, port)
 
 
 def run_cli(registry: list[tuple[str, callable]], argv: list[str]) -> int:

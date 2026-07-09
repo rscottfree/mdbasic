@@ -64,7 +64,7 @@ def session_menu_choice(crt, dorenum, domenu, next_port):
             results[tag] = want in harness.screen_text(s).upper()
             s.close()
         finally:
-            lib.finish(proc)
+            lib.finish_on_port(proc, port)
     return results
 
 
@@ -99,7 +99,7 @@ def session_menu_screen(crt, dorenum, domenu, next_port):
         results["menu_prompt_gone"] = "F1=DOCS" not in after
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -135,7 +135,7 @@ def session_renum_basic(crt, dorenum, domenu, next_port):
                                                              # (digit growth 30 -> 300)
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -176,7 +176,7 @@ def session_move_basic(crt, dorenum, domenu, next_port):
         results["move_sorted"] = 0 <= i15 < i30
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -228,7 +228,7 @@ def session_reject(crt, dorenum, domenu, next_port):
         time.sleep(0.6)
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -267,7 +267,7 @@ def session_shrink(crt, dorenum, domenu, next_port):
         results["runs_after_renum"] = "YES" in run
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -306,7 +306,7 @@ def session_big(crt, dorenum, domenu, next_port):
                                and "6 GOTO 7" in lst)
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -340,7 +340,7 @@ def session_screen_backup(crt, dorenum, domenu, next_port):
         results["screen_tool_gone"] = "RENUM" not in after
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -372,7 +372,7 @@ def session_dest_anchor(crt, dorenum, domenu, next_port):
                                    and "1010 PRINT" in lst)
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 
@@ -418,7 +418,7 @@ def session_copy_basic(crt, dorenum, domenu, next_port):
         results["copy_internal_ref"] = "210 GOTO 200" in lst
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 

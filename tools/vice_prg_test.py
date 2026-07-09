@@ -207,12 +207,57 @@ def wait_for_screen(sock: socket.socket, expects: list[str], timeout: float) -> 
     return False, last
 
 
+def close_socket(sock: socket.socket | None) -> None:
+    if sock is None:
+        return
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 def quit_vice(sock: socket.socket) -> None:
     try:
         monitor_cmd(sock, 0xBB)
         time.sleep(0.3)
     except OSError:
         pass
+    finally:
+        close_socket(sock)
+
+
+def shutdown_vice(proc: subprocess.Popen, sock: socket.socket | None = None,
+                  *, timeout: float = 5.0) -> None:
+    should_close = sock is not None
+    if sock is not None:
+        try:
+            quit_vice(sock)
+            should_close = False
+        except Exception:
+            pass
+        finally:
+            if should_close:
+                close_socket(sock)
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
+
+
+def shutdown_vice_on_port(proc: subprocess.Popen, port: int, *,
+                          connect_timeout: float = 1.0,
+                          timeout: float = 5.0) -> None:
+    sock = None
+    if proc.poll() is None:
+        try:
+            sock = connect_monitor(port, connect_timeout)
+        except SystemExit:
+            sock = None
+    shutdown_vice(proc, sock, timeout=timeout)
 
 
 def parse_file_arg(value: str) -> tuple[str, Path]:
@@ -309,13 +354,8 @@ def main() -> None:
     finally:
         if sock and not args.leave_running:
             quit_vice(sock)
-            sock.close()
         if not args.leave_running:
-            try:
-                proc.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3.0)
+            shutdown_vice(proc, timeout=3.0)
         log.close()
         if failed and log_path.exists():
             lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()

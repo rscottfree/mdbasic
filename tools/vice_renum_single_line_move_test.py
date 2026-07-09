@@ -59,7 +59,7 @@ def session_single_move(crt, dorenum, domenu, next_port):
         results["single_move_links_valid"] = nums == [50, 100, 300]
         harness.quit_vice(harness.connect_monitor(port, 20.0))
     finally:
-        lib.finish(proc)
+        lib.finish_on_port(proc, port)
     return results
 
 

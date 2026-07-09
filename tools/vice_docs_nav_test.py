@@ -107,11 +107,7 @@ def main() -> int:
         results["exit_ready"] = "READY" in harness.screen_text(s).upper()
         harness.quit_vice(s)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        harness.shutdown_vice_on_port(proc, PORT)
 
     for k, v in results.items():
         print(f"  {'PASS' if v else 'FAIL'}  {k}")

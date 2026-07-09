@@ -164,11 +164,7 @@ def main() -> int:
         s = harness.connect_monitor(PORT, 20.0)
         harness.quit_vice(s)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        harness.shutdown_vice_on_port(proc, PORT)
 
     print(f"  sentinel=${SENT:02x}")
     for name, addr in PROBES.items():

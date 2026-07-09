@@ -122,11 +122,7 @@ def main() -> int:
         s = harness.connect_monitor(PORT, 20.0)
         harness.quit_vice(s)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        harness.shutdown_vice_on_port(proc, PORT)
 
     print(f"  before: HIBASE=${before.get('hibase',0):02x} PNT=${before.get('pnt',0):04x}")
     print(f"  after : HIBASE=${after.get('hibase',0):02x} PNT=${after.get('pnt',0):04x} "
