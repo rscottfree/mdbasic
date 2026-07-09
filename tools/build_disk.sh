@@ -80,6 +80,7 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     PAGER="$OUTDIR/docs_pager.bin"
     HANDLER="$OUTDIR/menu.bin"
     MENUBODY="$OUTDIR/menu_body.bin"
+    LAUNCH="$OUTDIR/menu_launch.bin"
     RENUM="$OUTDIR/renum_tool.bin"
     MOVE="$OUTDIR/move_tool.bin"
     COPY="$OUTDIR/copy_tool.bin"
@@ -89,6 +90,8 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     tail -c +3 "$OUTDIR/menu.prg" > "$HANDLER"
     tmpx -i "$ROOT/menu_body.asm" -o "$OUTDIR/menu_body.prg" >/dev/null
     tail -c +3 "$OUTDIR/menu_body.prg" > "$MENUBODY"
+    tmpx -i "$ROOT/menu_launch.asm" -o "$OUTDIR/menu_launch.prg" >/dev/null
+    tail -c +3 "$OUTDIR/menu_launch.prg" > "$LAUNCH"
     tmpx -i "$ROOT/renum_tool.asm" -o "$OUTDIR/renum_tool.prg" >/dev/null
     tail -c +3 "$OUTDIR/renum_tool.prg" > "$RENUM"
     tmpx -i "$ROOT/move_tool.asm" -o "$OUTDIR/move_tool.prg" >/dev/null
@@ -96,8 +99,8 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     tmpx -i "$ROOT/copy_tool.asm" -o "$OUTDIR/copy_tool.prg" >/dev/null
     tail -c +3 "$OUTDIR/copy_tool.prg" > "$COPY"
     python3 "$ROOT/tools/build_docs.py" --pack "$OUTDIR/docs.bin" >/dev/null
-    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --move $MOVE --copy $COPY --menu $MENUBODY"
-    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + tools R/M/C $(wc -c <"$RENUM")/$(wc -c <"$MOVE")/$(wc -c <"$COPY") B"
+    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --move $MOVE --copy $COPY --menu $MENUBODY --launch $LAUNCH"
+    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + launcher $(wc -c <"$LAUNCH") B + tools R/M/C $(wc -c <"$RENUM")/$(wc -c <"$MOVE")/$(wc -c <"$COPY") B"
 else
     echo "Skipping docs: mdbasic.pdf or pdftotext not available"
 fi
