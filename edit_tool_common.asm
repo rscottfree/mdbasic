@@ -1,7 +1,7 @@
 ; ***MDBASIC shared in-place BASIC edit tool***
 ; A full-screen REPL launched from the CTRL+RESTORE menu (R/M/C). Copied to $c000
-; from its tool bank's $8000 and JSRed by the menu.asm $033c stub; RUN/STOP RTSs
-; back to the stub, which does the NMI-tail RTI into the editor.
+; from its tool bank's $8000 and jumped to by the launcher; RUN/STOP exits
+; straight through the KERNAL NMI tail back into the editor.
 ;
 ;   R [<inc>] [<start>] [<end>] [<dest>]
 ;                                -- partial renumber of the lines in the source
@@ -63,6 +63,7 @@ SCROLY   = $d011
 VMCSB    = $d018
 CI2PRA   = $dd00
 CLRSCR   = $e544
+NMIRTI   = $fe72
 LINKPRG  = $a533
 RUNC     = $a68e
 FRMNUM   = $ad8a
@@ -95,6 +96,7 @@ SCRBUF   = $cc00      ;1K snapshot of screen RAM ($0400-$07ff), saved once by
 ;restore. Zero page: menu.asm's copyrun scratch ($02-$05,$fb-$fe) is transient
 ;and expires before this tool runs; these addresses also avoid this tool's own
 ;persistent zero page (COUNT $0b, LINNUM $14, TXTTAB $2b, etc. below).
+SAV01    = $05        ;resident stub's saved original $01
 SAVD3    = $06        ;saved PNTR (cursor column)
 SAVD6    = $07        ;saved TBLX (cursor row)
 SAVPNT   = $08        ;saved PNT lo($08)/hi($09)
@@ -137,6 +139,18 @@ start
  sta NMIVEC
  lda #>nmistub
  sta NMIVEC+1
+ lda SAVD3
+ sta svd3
+ lda SAVD6
+ sta svd6
+ lda SAVPNT
+ sta svpnt
+ lda SAVPNT+1
+ sta svpnt+1
+ lda SAVHIB
+ sta svhib
+ lda SAVBLN
+ sta svbln
  jsr forcetext        ;canonical text mode / VIC bank 0 (in case graphics was on)
  jsr CLRSCR
  lda #<hdrtxt
@@ -165,21 +179,21 @@ texit
  sta NMIVEC
  lda savnmi+1
  sta NMIVEC+1
- lda SAVHIB
+ lda svhib
  cmp #$04
  bne tblank
  jsr forcetext
  jsr restorescreen    ;put the saved screen RAM + cursor position back
- lda SAVBLN
+ lda svbln
  sta BLNSW            ;resume the prior blink-enable state
  lda #$ff
  sta BLNON            ;char-shown phase: the resumed IRQ draws a fresh cursor
                       ;block, leaving no stale block artifact
  lda #1
  sta BLNCT            ;blink almost immediately
- lda sav01
+ lda SAV01
  sta R6510
- rts                  ;-> menu.asm stub does the NMI-tail RTI
+ jmp NMIRTI
 tblank
  jsr forcetext
  sei                  ;mask the blink IRQ across the clear + cursor reset (U64 race,
@@ -187,13 +201,13 @@ tblank
  jsr CLRSCR
  lda #$20
  sta GDCHAR
- lda SAVBLN
+ lda svbln
  sta BLNSW            ;resume the prior blink-enable state
  lda #$ff
  sta BLNON
- lda sav01
+ lda SAV01
  sta R6510
- rts                  ;-> menu.asm stub does the NMI-tail RTI
+ jmp NMIRTI
 
 nmistub
  rti
@@ -229,13 +243,13 @@ rs_cp
  sta SCREEN+$300,x
  inx
  bne rs_cp
- lda SAVD3
+ lda svd3
  sta PNTR
- lda SAVD6
+ lda svd6
  sta TBLX
- lda SAVPNT
+ lda svpnt
  sta PNT
- lda SAVPNT+1
+ lda svpnt+1
  sta PNT+1
  rts
 
@@ -1964,4 +1978,9 @@ resultcode .byte 0
 bufi      .byte 0
 sav01     .byte 0
 savnmi    .word 0
+svd3      .byte 0
+svd6      .byte 0
+svpnt     .word 0
+svhib     .byte 0
+svbln     .byte 0
 inbuf     .repeat 40, 0

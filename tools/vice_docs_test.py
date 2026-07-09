@@ -97,6 +97,19 @@ def nmi_frame_stub(dodocs: int) -> bytes:
     ])
 
 
+def open_docs_via_stub(port: int, target: int) -> str:
+    """Install the synthetic-NMI stub at $c000, SYS it, and return the pager text."""
+    s = harness.connect_monitor(port, 20.0)
+    harness.mem_set(s, STUB_ADDR, nmi_frame_stub(target))
+    s.close()
+    harness.keyboard_type_on_port(port, f"SYS{STUB_ADDR}\r")
+    time.sleep(1.2)
+    s = harness.connect_monitor(port, 20.0)
+    opened = harness.screen_text(s).upper()
+    s.close()
+    return opened
+
+
 # Disabled: flip to True to re-enable the sprite_timing execution-path regression.
 RUN_SPRITE_TIMING = False
 
@@ -131,6 +144,7 @@ def build_cart() -> tuple[Path, int]:
     dodocs = label_addr("/tmp/menu.lst", "dodocs")
     pager = asm("docs_pager.asm", "/tmp/pager.prg")
     menu = asm("menu_body.asm", "/tmp/menubody.prg")
+    launch = asm("menu_launch.asm", "/tmp/menulaunch.prg")
     renum = asm("renum_tool.asm", "/tmp/renum.prg")
     move = asm("move_tool.asm", "/tmp/move.prg")
     copy = asm("copy_tool.asm", "/tmp/copy.prg")
@@ -138,7 +152,8 @@ def build_cart() -> tuple[Path, int]:
     idx = (ROOT / "build/docs.idx").read_bytes()
     dat = (ROOT / "build/docs.dat").read_bytes()
     banks = make_crt.doc_banks(pager, idx, dat, handler,
-                               renum=renum, move=move, copy=copy, menu=menu)
+                               renum=renum, move=move, copy=copy, menu=menu,
+                               launch=launch)
     image = make_crt.image_from_prg((ROOT / "mdbasic.prg").read_bytes())
     crt = make_crt.build_crt(image, name="MDDOCS", stub=stub, extra_banks=banks)
     out = Path("/tmp/mddocs.crt")
@@ -175,11 +190,12 @@ def main() -> int:
         # Leave a marker on screen so we can prove it survives a docs round-trip.
         harness.keyboard_type_on_port(PORT, '?"ZZMARK"\r')
         time.sleep(0.5)
-        # Poke the synthetic-NMI-frame stub and SYS it. The stub jumps to dodocs
-        # (the CTRL+RESTORE docs entry, past the CTRL/STOP gate) with a return
-        # frame in place, so the handler's new $fe72/RTI exit returns cleanly.
+        # Clobber the classic sprite-data range in the cassette buffer, then poke
+        # the synthetic NMI-frame stub and SYS it. The stub jumps to dodocs (the
+        # direct docs entry in the resident handler) with a return frame in place,
+        # so the handler's $fe72/RTI exit returns cleanly.
         s = harness.connect_monitor(PORT, 20.0)
-        harness.mem_set(s, STUB_ADDR, nmi_frame_stub(dodocs))
+        harness.mem_set(s, 0x0340, bytes(range(64)))
         # Stamp a distinctive low-nybble color pattern on an untouched row (row 5,
         # clear of the cursor/print area) so we can prove the pager packs and
         # restores color RAM rather than leaving its solid fill (color 14) behind.
@@ -187,13 +203,10 @@ def main() -> int:
         COLPAT = bytes([0x02, 0x05, 0x07, 0x03])
         harness.mem_set(s, COLCELLS, COLPAT)
         s.close()
-        harness.keyboard_type_on_port(PORT, f"SYS{STUB_ADDR}\r")
-        time.sleep(1.2)
-        s = harness.connect_monitor(PORT, 20.0)
-        opened = harness.screen_text(s).upper()
+        opened = open_docs_via_stub(PORT, dodocs)
+        results["resident_survives_0340_clobber"] = "SEARCH" in opened
         results["pager_opens"] = "SEARCH" in opened               # search page is default
         results["search_grid"] = "AUTO" in opened                 # grid lists topics (no filter)
-        s.close()
         harness.keyboard_type_on_port(PORT, "SPRITE\r")           # filter + enter -> doc page
         time.sleep(0.7)
         s = harness.connect_monitor(PORT, 20.0)

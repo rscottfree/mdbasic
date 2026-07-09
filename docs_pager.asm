@@ -5,7 +5,8 @@
 ; JSRs it (see docs-pager design). Assembled for $c000 (run location).
 ;
 ;   on entry: bank 3 paged in only long enough for the hook's code copy.
-;   on exit:  cart paged out, NMI/cursor/$01 restored, screen cleared, RTS.
+;   on exit:  cart paged out, NMI/cursor/$01 restored, screen cleared, then the
+;             KERNAL NMI tail RTIs back to the interrupted editor.
 ;
 ; Pager opens on a SEARCH page (mode=0). The user types to filter the keyword
 ; grid, presses ENTER to open a help page (mode=1), and F2 to toggle between
@@ -46,6 +47,7 @@ HIBASE   = $0288      ;top page of screen memory for kernal prints
 NMIVEC   = $0318
 KEYLOG   = $028f      ;keyboard decode-table setup vector (MDBASIC hooks this)
 STDKEYLOG = $eb48     ;kernal's standard decode-table setup (no func-key strings)
+NMIRTI   = $fe72
 SCREEN   = $0400
 SPENA    = $d015      ;sprite enable register
 SCROLY   = $d011      ;VIC control register 1
@@ -74,6 +76,7 @@ SCRBUF   = $cc00      ;1K snapshot of screen RAM ($0400-$07ff), saved once by
 ;restore. Zero page: menu.asm's copyrun scratch ($02-$05,$fb-$fe) is transient
 ;and expires before this pager runs; these addresses also avoid this pager's own
 ;persistent zero page (TMP $02, SRCP $fb, SCRP $fd above).
+SAV01    = $05        ;resident stub's saved original $01
 SAVD3    = $06        ;saved PNTR (cursor column)
 SAVD6    = $07        ;saved TBLX (cursor row)
 SAVPNT   = $08        ;saved PNT lo($08)/hi($09)
@@ -115,6 +118,18 @@ entry
  sta KEYLOG
  lda #>STDKEYLOG
  sta KEYLOG+1
+ lda SAVD3
+ sta svd3
+ lda SAVD6
+ sta svd6
+ lda SAVPNT
+ sta svpnt
+ lda SAVPNT+1
+ sta svpnt+1
+ lda SAVHIB
+ sta svhib
+ lda SAVBLN
+ sta svbln
  sei
  lda #INDEX_BANK
  sta CART
@@ -431,7 +446,7 @@ exit
  sta CART            ;ensure cart paged out
  jsr restorescreen   ;put the saved screen RAM + cursor position back
  jsr restorecolor    ;unpack the saved color RAM back over fillcolor's solid fill
- lda SAVBLN
+ lda svbln
  sta BLNSW           ;resume the prior blink-enable state
  lda #$ff
  sta BLNON           ;char-shown phase: the resumed kernal IRQ draws a fresh
@@ -464,7 +479,7 @@ exit
  ;cursor won't reappear until a key is pressed. Clear to a fresh $0400 screen:
  ;that rebuilds the link table, homes the cursor, and fixes PNT. Page 0
  ;(savhib = $04) keeps its restored screen and cursor untouched.
- lda SAVHIB
+ lda svhib
  cmp #$04
  beq exdone
  sei                ;mask the cursor-blink IRQ across the clear + cursor reset.
@@ -481,9 +496,9 @@ exit
 exdone
  lda savturbo
  sta U64SPEED        ;restore the Ultimate 64 turbo speed bits
- lda sav01
+ lda SAV01
  sta R6510
- rts
+ jmp NMIRTI
 
 nmistub
  rti                 ;neutralise RESTORE while a cart bank is paged in
@@ -750,13 +765,13 @@ rs_cp
  sta SCREEN+$300,x
  inx
  bne rs_cp
- lda SAVD3
+ lda svd3
  sta PNTR
- lda SAVD6
+ lda svd6
  sta TBLX
- lda SAVPNT
+ lda svpnt
  sta PNT
- lda SAVPNT+1
+ lda svpnt+1
  sta PNT+1
  rts
 
@@ -1416,6 +1431,11 @@ savbdr   .byte 0      ;saved border color
 savbg    .byte 0      ;saved background color
 savfg    .byte 0      ;saved foreground color
 savturbo .byte 0      ;saved Ultimate 64 turbo speed register ($d031)
+svd3     .byte 0
+svd6     .byte 0
+svpnt    .word 0
+svhib    .byte 0
+svbln    .byte 0
 mode     .byte 0      ;0=search page, 1=doc view
 filtbuf  .repeat NAMELEN,0 ;active filter (screen codes)
 filtlen  .byte 0

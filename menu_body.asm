@@ -1,29 +1,25 @@
 ; ***MDBASIC CTRL+RESTORE menu-body UI***
-; Drawn/run at $c000 (copied there from the first tool bank's $9800 by the $033c stub in
-; menu.asm). This is the ONE place that snapshots screen RAM + cursor + blink
-; state for the whole CTRL+RESTORE flow -- see SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN
-; below. menu.asm's `runmenu` always runs this before any tool, in one of two
-; modes selected by SAVEONLY:
+; Copied to $c000 from the first tool bank's $9800 by the resident stub in
+; menu.asm. This is the ONE place that snapshots screen RAM + cursor + blink
+; state for the whole CTRL+RESTORE flow and, in full-UI mode, shows the prompt
+; and returns the user's choice in X.
 ;
-;   SAVEONLY = 0 (domenu, the real CTRL+RESTORE path): draws five menu lines
+; It runs in one of two modes selected by SAVEONLY:
+;
+;   SAVEONLY = 0 (the real CTRL+RESTORE path): draws five menu lines
 ;   (one item per row) at the top of the screen with the blinking cursor
 ;   disabled (this is a GETIN read loop, not the screen editor -- there's no
 ;   real cursor to blink), reads one key, and returns the choice in X: 0 =
 ;   dismiss, 1 = docs pager, 2 = renumber, 3 = move, 4 = copy. On dismiss it
-;   restores the screen/cursor/blink itself; on F1/R/M/C it leaves that to the
-;   dispatched tool's own exit, since SCRBUF/SAVD3/SAVD6/SAVPNT/SAVHIB/SAVBLN
-;   already hold the true pre-menu state for it to restore from.
+;   restores the screen/cursor/blink itself; on F1/R/M/C it leaves the saved
+;   pre-menu state intact for the dispatched tool's own exit to restore.
 ;
-;   SAVEONLY != 0 (dodocs/dorenum, the test-bypass entries in menu.asm): skips
-;   the UI entirely -- just takes the snapshot and returns immediately, so the
-;   tool that runs next (without ever seeing this menu) still has a valid
-;   snapshot to restore from at its own exit.
+;   SAVEONLY != 0 (dodocs/dorenum/domove/docopy in menu.asm): skips the UI and
+;   just takes the snapshot, then returns immediately so the chosen tool still
+;   has a valid restore snapshot.
 ;
-; This runs BEFORE any tool is launched (the stub copies the chosen tool over
-; $c000 afterwards), so it is free to live in the tool region. In full-UI mode
-; it points the func-key decode vector back at the kernal standard for the read
-; (MDBASIC otherwise expands F1 to a KEY string) and restores it before
-; returning, so the tool that follows sees the user's real KEYLOG hook.
+; This runs before any tool is launched, so it is free to live in the tool
+; region at $c000 and simply RTS to the resident stub.
 ;
 ; Same screen-snapshot idiom (SCRBUF $cc00, savhib SCREEN-1-5 fallback) as
 ; docs_pager.asm / edit_tool_common.asm; see the renum-move-tool design memory.
@@ -63,7 +59,6 @@ KEY_R    = "r"
 KEY_M    = "m"
 KEY_C    = "c"
 KEY_STOP = $03
-
 ;--- shared CTRL+RESTORE handoff (also used by edit_tool_common.asm/docs_pager.asm) ---
 ;This save happens exactly once per invocation, here. The chosen tool's own
 ;exit reads these back to restore -- it never re-saves. Zero page: menu.asm's
@@ -82,14 +77,14 @@ SAVBLN   = $0d        ;saved BLNSW (blink-enable state at CTRL+RESTORE time)
 
 start
  lda SAVEONLY
- beq fullui           ;0 -> show the real F1/R/M/C/STOP menu (domenu)
-;--- quick save-only path (dodocs/dorenum): snapshot and return immediately ---
- lda HIBASE
+ beq fullui           ;0 -> show the real F1/R/M/C/STOP menu
+;--- quick save-only path (dodocs/dorenum/domove/docopy): snapshot and return ---
+ jsr gethib
  sta SAVHIB
  jsr savescreen
  lda BLNSW
  sta SAVBLN
- rts                  ;X is undefined -- caller ignores it in this mode
+ rts
 
 ;--- full UI path ---
 fullui
@@ -105,7 +100,7 @@ fullui
  sta QTSW
  sta INSRT
  sta RVS
- lda HIBASE           ;remember whether we're on the $0400 text screen (page 0)
+ jsr gethib           ;remember whether we're on the $0400 text screen (page 0)
  sta SAVHIB           ;or a SCREEN 1-5 page -- savescreen below is only meaningful
                       ;for page 0; a graphics page's content isn't recoverable
  jsr savescreen       ;snapshot screen RAM + cursor pos so we can put it back
@@ -173,8 +168,7 @@ chosen
  sei
  cpx #0
  bne fin              ;F1/R/M/C chosen -> leave screen/cursor/blink saved as-is for
-                      ;the dispatched tool's own exit to restore; nothing to
-                      ;undo here
+                      ;the dispatched tool's own exit to restore
  lda SAVHIB
  cmp #$04
  bne fromgfx          ;came from a SCREEN 1-5 page -- its content was never saved,
@@ -214,6 +208,13 @@ forcetext
  sta VMCSB
  lda #$04
  sta HIBASE
+ rts
+
+gethib
+ lda HIBASE
+ bne gh_ok
+ lda #$04
+gh_ok
  rts
 
 ;==================== screen snapshot / restore ====================
