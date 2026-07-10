@@ -14,6 +14,7 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"   # tmpx resolves .include paths against the cwd
 TEMPLATE="${MDBASIC_D64_TEMPLATE:-$ROOT/mdbasic.d64}"
 
 OUTDIR=""
@@ -84,6 +85,7 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     MOVE="$OUTDIR/move_tool.bin"
     COPY="$OUTDIR/copy_tool.bin"
     CONVERT="$OUTDIR/convert_tool.bin"
+    PACK="$OUTDIR/pack_tool.bin"
     tmpx -i "$ROOT/docs_pager.asm" -o "$OUTDIR/docs_pager.prg" >/dev/null
     tail -c +3 "$OUTDIR/docs_pager.prg" > "$PAGER"
     tmpx -i "$ROOT/menu.asm" -o "$OUTDIR/menu.prg" >/dev/null
@@ -98,9 +100,18 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     tail -c +3 "$OUTDIR/copy_tool.prg" > "$COPY"
     tmpx -i "$ROOT/convert_tool.asm" -o "$OUTDIR/convert_tool.prg" >/dev/null
     tail -c +3 "$OUTDIR/convert_tool.prg" > "$CONVERT"
+    # package tool: boot stub first (pack_tool.asm embeds it via the
+    # generated build/pack_stub.inc; make_crt.py patches its newvec/initclk
+    # sentinels from the fresh listing)
+    tmpx -i "$ROOT/pack_stub.asm" -o "$OUTDIR/pack_stub.prg" >/dev/null
+    tail -c +3 "$OUTDIR/pack_stub.prg" > "$OUTDIR/pack_stub.bin"
+    mkdir -p "$ROOT/build"
+    python3 "$ROOT/tools/bin2inc.py" "$OUTDIR/pack_stub.bin" "$ROOT/build/pack_stub.inc" stubtpl
+    tmpx -i "$ROOT/pack_tool.asm" -o "$OUTDIR/pack_tool.prg" >/dev/null
+    tail -c +3 "$OUTDIR/pack_tool.prg" > "$PACK"
     python3 "$ROOT/tools/build_docs.py" --pack "$OUTDIR/docs.bin" >/dev/null
-    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --move $MOVE --copy $COPY --convert $CONVERT --menu $MENUBODY"
-    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + tools R/M/C/F7 $(wc -c <"$RENUM")/$(wc -c <"$MOVE")/$(wc -c <"$COPY")/$(wc -c <"$CONVERT") B"
+    DOCS_ARGS="--pager $PAGER --index $OUTDIR/docs.idx --data $OUTDIR/docs.dat --handler $HANDLER --renum $RENUM --move $MOVE --copy $COPY --convert $CONVERT --pack $PACK --mdbasic-lst $LST --menu $MENUBODY"
+    echo "Built docs: index+data + pager $(wc -c <"$PAGER") B + menu $(wc -c <"$HANDLER") B + menu-body $(wc -c <"$MENUBODY") B + tools R/M/C/F7/P $(wc -c <"$RENUM")/$(wc -c <"$MOVE")/$(wc -c <"$COPY")/$(wc -c <"$CONVERT")/$(wc -c <"$PACK") B"
 else
     echo "Skipping docs: mdbasic.pdf or pdftotext not available"
 fi

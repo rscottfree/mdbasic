@@ -18,7 +18,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILDDIR="${1:-$ROOT/build}"
 REMOTE_DIR="/Temp"
 U64="${U64_BIN:-$HOME/.local/bin/u64}"
-FILES="mdbasic.d64 mdbasic.d81 mdbasic.crt mdbasic.prg"
+FILES="mdbasic.d64 mdbasic.d81 mdbasic.crt mdbasic.prg packaged.d81"
 
 command -v "$U64" >/dev/null 2>&1 || {
     echo "ERROR: u64 CLI not found: $U64" >&2

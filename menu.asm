@@ -1,7 +1,7 @@
 ; ***MDBASIC CTRL+RESTORE utility menu -- $033c stub***
 ; Freeze-cartridge style trigger: pressing CTRL+RESTORE shows a tiny function-key
 ; menu that launches the docs pager (F1), the renumber/move/copy tools (R/M/C),
-; or the convert tool (F7).
+; the packager (P) or the convert tool (F7).
 ;
 ; The boot loader copies this stub from cart bank 3 ($9800) to $033c (cassette
 ; buffer), stashes the image's original runstp (RESTORE/NMI) address at REALGONE,
@@ -11,7 +11,7 @@
 ; disturb running programs.
 ;
 ;   CTRL + RESTORE       -> show the utility menu (F1 docs, R renumber,
-;                           M move, C copy, F7 convert,
+;                           M move, C copy, P package, F7 convert,
 ;                           RUN/STOP dismisses).
 ;   RESTORE alone        -> the original runstp behaviour (editor-mode reset).
 ;   RUN/STOP + RESTORE   -> the original runstp behaviour (break), via REALGONE.
@@ -36,9 +36,9 @@
 ; (which skip the UI) still need the save to happen, so they set SAVEONLY=1 and
 ; menu_body just snapshots and returns immediately.
 ;
-; make_crt.py patches `toolbanks` (fixed offsets 3..6, right after the opening
-; JMP) with the actual R/M/C/convert tool bank numbers, which vary with the
-; doc-data count.
+; make_crt.py patches `toolbanks` (fixed offsets 3..7, right after the opening
+; JMP) with the actual R/M/C/convert/package tool bank numbers, which vary with
+; the doc-data count.
 
 R6510    = $01
 CART     = $de00
@@ -56,16 +56,16 @@ CPSRC    = $03        ;copyrun source page hi
 CPDST    = $04        ;copyrun dest page hi
 SAV01    = $05        ;saved $01
 SAVEONLY = $0e        ;shared flag read by menu_body.asm's `start`: 0 = show the
-                      ;full F1/R/M/C/STOP UI (domenu); nonzero = skip the UI and
+                      ;full F1/R/M/C/P/STOP UI (domenu); nonzero = skip the UI and
                       ;just save screen/cursor/blink state, then return (dodocs/
                       ;dorenum). Also safe during this NMI -- see SRCZP above.
 CHOICE   = $0f        ;direct-entry choice for tests (1 docs, 2 R, 3 M, 4 C,
-                      ;5 convert)
+                      ;5 convert, 6 package)
 
 *=$033c
 
  jmp start
-toolbanks .byte $ff,$ff,$ff,$ff ;offsets 3..6: RENUM/MOVE/COPY/CONVERT banks, patched by make_crt.py
+toolbanks .byte $ff,$ff,$ff,$ff,$ff ;offsets 3..7: RENUM/MOVE/COPY/CONVERT/PACK banks, patched by make_crt.py
 
 start
  jsr SCNSTOP          ;scan keyboard for STOP
@@ -96,26 +96,24 @@ docopy
  bne direct
 doconvert
  lda #5
+ bne direct
+dopack
+ lda #6
+ bne direct
+domenu
+ lda #0               ;falls into direct: CHOICE=0 selects the full UI below
 direct
  sta CHOICE
- lda R6510
- sta SAV01
- lda #$37
- sta R6510
- lda #1
- sta SAVEONLY
- jsr runmenu
- ldx CHOICE
- jmp dispatch
-
-domenu
+ sta SAVEONLY         ;0 = full F1/R/M/C/P/STOP UI (domenu); nonzero = quick
+                      ;save-only path for the direct test entries above
  lda R6510
  sta SAV01
  lda #$37
  sta R6510            ;BASIC+KERNAL+I/O in, cart visible at $8000
- lda #0
- sta SAVEONLY         ;full F1/R/M/C/STOP UI this time (not the quick save-only path)
- jsr runmenu          ;X = choice (0/1/2)
+ jsr runmenu          ;full UI: X = choice; save-only: X undefined
+ lda CHOICE
+ beq dispatch         ;menu path: take runmenu's X
+ tax                  ;direct path: the entry's own choice
 dispatch
  cpx #1
  beq lpager
@@ -125,7 +123,7 @@ dispatch
  sec
  sbc #2
  tax
- lda toolbanks,x      ;2/3/4/5 -> renumber/move/copy/convert bank
+ lda toolbanks,x      ;2/3/4/5/6 -> renumber/move/copy/convert/package bank
  ldx #12              ;12 pages = 3K, leaves SCRBUF at $cc00 intact
  bne launchtool
 lpager

@@ -119,7 +119,9 @@ def asm(src: str, out: str, lst: str | None = None) -> bytes:
     if lst:
         cmd += ["-l", lst]
     cmd += ["-i", str(ROOT / src), "-o", out]
-    subprocess.run(cmd, check=True, capture_output=True)
+    # cwd=ROOT: tmpx resolves .include paths against the cwd (renum_tool.asm
+    # pulls edit_tool_common.asm, pack_tool.asm pulls build/pack_stub.inc)
+    subprocess.run(cmd, check=True, capture_output=True, cwd=ROOT)
     return Path(out).read_bytes()[2:]          # strip 2-byte load address
 
 
@@ -137,7 +139,8 @@ def label_addr(lst_path: str, label: str) -> int:
 
 
 def build_cart() -> tuple[Path, int]:
-    subprocess.run(["tmpx", "-i", str(ROOT / "mdbasic.asm"),
+    subprocess.run(["tmpx", "-l", "/tmp/mdbasic.lst",
+                    "-i", str(ROOT / "mdbasic.asm"),
                     "-o", str(ROOT / "mdbasic.prg")], check=True, capture_output=True)
     stub = asm("boot.asm", "/tmp/boot.prg")
     handler = asm("menu.asm", "/tmp/menu.prg", lst="/tmp/menu.lst")
@@ -148,12 +151,22 @@ def build_cart() -> tuple[Path, int]:
     move = asm("move_tool.asm", "/tmp/move.prg")
     copy = asm("copy_tool.asm", "/tmp/copy.prg")
     convert = asm("convert_tool.asm", "/tmp/convert.prg")
+    # package tool: assemble its boot stub, regenerate the embed include,
+    # assemble the tool, patch the newvec/initclk sentinels from the listing
+    packstub = asm("pack_stub.asm", "/tmp/pack_stub.prg")
+    (ROOT / "build").mkdir(exist_ok=True)
+    Path("/tmp/pack_stub.bin").write_bytes(packstub)
+    subprocess.run([sys.executable, str(ROOT / "tools/bin2inc.py"),
+                    "/tmp/pack_stub.bin", str(ROOT / "build/pack_stub.inc"),
+                    "stubtpl"], check=True)
+    pack = asm("pack_tool.asm", "/tmp/pack.prg")
+    pack = make_crt.patch_pack_tool(pack, Path("/tmp/mdbasic.lst"))
     build_docs.pack(ROOT / "build/docs.bin")
     idx = (ROOT / "build/docs.idx").read_bytes()
     dat = (ROOT / "build/docs.dat").read_bytes()
     banks = make_crt.doc_banks(pager, idx, dat, handler,
                                renum=renum, move=move, copy=copy, convert=convert,
-                               menu=menu)
+                               pack=pack, menu=menu)
     image = make_crt.image_from_prg((ROOT / "mdbasic.prg").read_bytes())
     crt = make_crt.build_crt(image, name="MDDOCS", stub=stub, extra_banks=banks)
     out = Path("/tmp/mddocs.crt")
