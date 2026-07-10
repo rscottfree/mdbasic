@@ -36,31 +36,29 @@ cause an ILLEGAL QUANTITY ERROR.
 
 options (0-255, default 15) is an
 optional set of eight bit flags:
-Bit# Value Option
-0 1 (default) Draw quadrant 1
-(top-right)
-1 2 (default) Draw quadrant 2 (top-left)
-2 4 (default) Draw quadrant 3
-(bottom-left)
-3 8 (default) Draw quadrant 4
-(bottom-right)
-4 16 Draw line segment from center to
-right edge
-5 32 Draw line segment from center to
-top edge
-6 64 Draw line segment from center to
-left edge
-7 128 Draw line segment from center to
-bottom edge
+
+<!-- table: mode=sections -->
+| BIT# | VALUE | OPTION |
+|--|--|--|
+| 0 | 1 | (default) Draw quadrant 1 (top-right) |
+| 1 | 2 | (default) Draw quadrant 2 (top-left) |
+| 2 | 4 | (default) Draw quadrant 3 (bottom-left) |
+| 3 | 8 | (default) Draw quadrant 4 (bottom-right) |
+| 4 | 16 | Draw line segment from center to right edge |
+| 5 | 32 | Draw line segment from center to top edge |
+| 6 | 64 | Draw line segment from center to left edge |
+| 7 | 128 | Draw line segment from center to bottom edge |
 
 plotType (0-2) is the manner that the
 dots will be drawn as follows:
-0 = Erase dot(s)
-1 = Draw dot(s)
-2 = Flip dot(s) (reverses current
-condition: on=off, off=on)
-3 = None (useful with the DRAW
-statement)
+
+<!-- table: mode=sections -->
+| PLOT TYPE | FUNCTION |
+|--|--|
+| 0 | Erase dot(s) |
+| 1 | Draw dot(s) |
+| 2 | Flip dot(s) (reverses current condition: on=off, off=on) |
+| 3 | None (useful with the DRAW statement) |
 
 color (0-15 in hi-resolution mode, 1-3
 in multicolor mode), is an optional

@@ -29,11 +29,12 @@ share these extended colors. The table
 below lists the four 2-bit patterns with
 the source of the color value:
 
-PATTERN COLOR
-00 background color
-01 sc1
-10 sprite color
-11 sc2
+| PATTERN | COLOR |
+|--|--|
+| 00 | background color |
+| 01 | sc1 |
+| 10 | sprite color |
+| 11 | sc2 |
 
 On system startup the default colors are
 sc1=4 (Purple) and sc2=0 (Black). To be

@@ -38,12 +38,13 @@ COORDINATE ERROR.
 plotType (0-3) determines how the dot
 will be plotted as follows:
 
-PLOT TYPE FUNCTION
-0 Erase pixel
-1 Plot pixel (default)
-2 Flip pixel (on=off, off=on)
-3 None, set current plot coordinate only
-– useful with DRAW statement
+<!-- table: mode=sections -->
+| PLOT TYPE | FUNCTION |
+|--|--|
+| 0 | Erase pixel |
+| 1 | Plot pixel (default) |
+| 2 | Flip pixel (on=off, off=on) |
+| 3 | None, set current plot coordinate only - useful with DRAW statement |
 
 color (0-15 in hi-resolution mode, 1-3
 in multicolor mode), sets the color for

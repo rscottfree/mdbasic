@@ -32,18 +32,20 @@ shape$ contains the drawing commands
 separated by commas. Each command has an
 associated value. Below is the list of
 available commands:
-COMMAND FUNCTION VALUE/RANGE
-P Change plot type 0=clear, 1=set,
-2=flip, 3=none
-C Change plot color 0-15
-U UP 0-65535
-D DOWN 0-65535
-L LEFT 0-65535
-R RIGHT 0-65535
-E UP & LEFT 0-65535
-F UP & RIGHT 0-65535
-G DOWN & LEFT 0-65535
-H DOWN & RIGHT 0-65535
+
+<!-- table: mode=sections -->
+| COMMAND | FUNCTION | VALUE/RANGE |
+|--|--|--|
+| P | Change plot type | 0=clear, 1=set, 2=flip, 3=none |
+| C | Change plot color | 0-15 |
+| U | UP | 0-65535 |
+| D | DOWN | 0-65535 |
+| L | LEFT | 0-65535 |
+| R | RIGHT | 0-65535 |
+| E | UP & LEFT | 0-65535 |
+| F | UP & RIGHT | 0-65535 |
+| G | DOWN & LEFT | 0-65535 |
+| H | DOWN & RIGHT | 0-65535 |
 
 The values for directional draw commands
 specify the number of dots (pixels) to

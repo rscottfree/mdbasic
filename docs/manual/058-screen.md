@@ -130,15 +130,13 @@ visible immediately. The table below
 lists the four 2-bit patterns and the
 associated color source:
 
-PATTERN COLOR SOURCE AVAILABLE COLORS
-00 background color background color reg
-0 0-15
-01 cc1 background color reg 1 0-15
-10 cc2 background color reg 2 0-15
-11 foreground color color RAM
-($D800-$BDFF) 0-7 select std color mode,
-first 3 bits, colors 0-7 8-15 select
-multicolor of 0-7
+<!-- table: mode=sections -->
+| PATTERN | COLOR | SOURCE | AVAILABLE COLORS |
+|--|--|--|--|
+| 00 | background color | background color reg 0 | 0-15 |
+| 01 | cc1 | background color reg 1 | 0-15 |
+| 10 | cc2 | background color reg 2 | 0-15 |
+| 11 | foreground color | color RAM ($D800-$BDFF) | 0-7 select std color mode, first 3 bits, colors 0-7. 8-15 select multicolor of 0-7 |
 
 If a character is printed to the screen
 using colors 0-7, the character is
@@ -178,16 +176,13 @@ character of codes 0-63. The COLOR
 statement is used to set the colors to
 be selectable by each bit pair.
 
-PATTERN COLOR CODES SOURCE AVAILABLE
-COLORS
-00 background color 0-63 background
-color reg 0 0-15
-01 cc1 64-127 background color reg 1
-0-15
-10 cc2 128-191 background color reg 2
-0-15
-11 cc3 192-255 background color reg 3
-0-15
+<!-- table: mode=sections -->
+| PATTERN | COLOR | CODES | SOURCE | AVAILABLE COLORS |
+|--|--|--|--|--|
+| 00 | background color | 0-63 | background color reg 0 | 0-15 |
+| 01 | cc1 | 64-127 | background color reg 1 | 0-15 |
+| 10 | cc2 | 128-191 | background color reg 2 | 0-15 |
+| 11 | cc3 | 192-255 | background color reg 3 | 0-15 |
 
 Extended background color mode can be
 used to produce a window-like effect on

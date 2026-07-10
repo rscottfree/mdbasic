@@ -36,13 +36,13 @@ for the base. All spaces are ignored.
 Below is the list of string-to-value
 conversions.
 
-FUNCTION BASE BASE NAME PARAMETER VALUE
-EXAMPLES*
-VALB 2 Binary "1", "11001",
-"1100000000000000"
-VALO 8 Octal "1", "31", "140000"
-VAL 10 Decimal "1", "25", "49152"
-VALH 16 Hexadecimal "1", "19", "C000"
+<!-- table: mode=sections -->
+| FUNCTION | BASE | BASE NAME | PARAMETER VALUE EXAMPLES* |
+|--|--|--|--|
+| VALB | 2 | Binary | "1", "11001", "1100000000000000" |
+| VALO | 8 | Octal | "1", "31", "140000" |
+| VAL | 10 | Decimal | "1", "25", "49152" |
+| VALH | 16 | Hexadecimal | "1", "19", "C000" |
 
 *In the table above, the parameter value
 examples will all result in decimal
