@@ -12,16 +12,16 @@ statements, functions and variables.
 Each one is described in detail using
 the following format:
 
-✔ Purpose A short summary describing the
+✔ Purpose: A short summary describing the
 reason for the instruction
 
-✔ Syntax Generic variations of how the
+✔ Syntax: Generic variations of how the
 keywords and parameters are used
 
-✔ Description A detailed explanation of
+✔ Description: A detailed explanation of
 the instruction and parameters
 
-✔ Example One or more examples of the
+✔ Example: One or more examples of the
 instruction
 
 Documentation of Syntax

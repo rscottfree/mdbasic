@@ -547,6 +547,9 @@ prresult
  jsr prstrAY
  lda #$0d
  jsr CHROUT
+ lda #$0d             ;match convert_tool.asm: leave a blank line before
+ jsr CHROUT           ;the next prompt, which also forces the same scroll
+                      ;behaviour once the screen fills.
 prr_x
  rts
 

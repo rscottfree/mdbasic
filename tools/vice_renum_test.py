@@ -47,6 +47,14 @@ def cursor_cells(sock):
     return [i for i, b in enumerate(screen) if b == 0xA0]
 
 
+def has_blank_gap_before_prompt(screen: str, marker: str) -> bool:
+    lines = screen.upper().splitlines()
+    for i, line in enumerate(lines[:-2]):
+        if marker in line:
+            return lines[i + 1] == "" and lines[i + 2].startswith(">")
+    return False
+
+
 def session_menu_choice(crt, dorenum, domenu, next_port):
     """the menu-body itself (F1 -> pager, R/M/C/F7 -> tools). SYS to `domenu`
     (past the CTRL/STOP gate); the menu-body draws its prompt and waits for a
@@ -126,7 +134,9 @@ def session_renum_basic(crt, dorenum, domenu, next_port):
         s.close()
         lib.cmd(port, "100")                     # increment 100 -> 100,200,300,400,500
         s = harness.connect_monitor(port, 20.0)
-        results["repl_ok"] = "OK" in harness.screen_text(s).upper()
+        txt = harness.screen_text(s)
+        results["repl_ok"] = "OK" in txt.upper()
+        results["repl_blank_gap"] = has_blank_gap_before_prompt(txt, "OK")
         s.close()
         harness.keyboard_type_on_port(port, "\x03")   # RUN/STOP -> leave tool
         time.sleep(0.6)
@@ -162,7 +172,9 @@ def session_move_basic(crt, dorenum, domenu, next_port):
         lib.open_tool(port, lib.DOMOVE)
         lib.cmd(port, "150 210 15")
         s = harness.connect_monitor(port, 20.0)
-        results["move_ok"] = "OK" in harness.screen_text(s).upper()
+        txt = harness.screen_text(s)
+        results["move_ok"] = "OK" in txt.upper()
+        results["move_blank_gap"] = has_blank_gap_before_prompt(txt, "OK")
         s.close()
         harness.keyboard_type_on_port(port, "\x03")
         time.sleep(0.6)
@@ -457,7 +469,9 @@ def session_copy_basic(crt, dorenum, domenu, next_port):
         s.close()
         lib.cmd(port, "100 120 200")
         s = harness.connect_monitor(port, 20.0)
-        results["copy_ok"] = "OK" in harness.screen_text(s).upper()
+        txt = harness.screen_text(s)
+        results["copy_ok"] = "OK" in txt.upper()
+        results["copy_blank_gap"] = has_blank_gap_before_prompt(txt, "OK")
         nums = lib.walk_links(s)
         s.close()
         results["copy_links_valid"] = nums == [10, 20, 100, 110, 120, 200, 210, 220]
