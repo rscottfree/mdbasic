@@ -22,6 +22,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import vice_prg_test as harness
 import vice_docs_test as dt
 import vice_pack_test as pt
+import vice_pack_list_test as plt
+import c64_basic_prg
 
 BASEPORT = 7200
 OUT_D81 = ROOT / "build" / "packaged.d81"
@@ -38,8 +40,12 @@ EXAMPLES = [
     ("trim$test", "THIS IS A TRIM$ TEST"),
     ("linetest", None),            # verified via bitmap mode/drawn RAM probe
     ("gamesounds", "GAME-LIKE SOUNDS"),
+    ("pklist", plt.MARKER),        # LIST-parity test program (endless loop)
 ]
 DATA_FILES = ["bird.spr", "font1", "font2", "font3", "font4", "font5"]
+
+# Not on the template D64: compiled from vice_pack_list_test's source instead.
+COMPILED = {"pklist": plt.SRC}
 
 
 def packaged_name(example: str) -> str:
@@ -47,7 +53,12 @@ def packaged_name(example: str) -> str:
 
 
 def build_disk_and_package(crt, dopack, port) -> None:
-    entries = pt.extract_examples([n for n, _ in EXAMPLES] + DATA_FILES)
+    entries = pt.extract_examples(
+        [n for n, _ in EXAMPLES if n not in COMPILED] + DATA_FILES)
+    for name, src in COMPILED.items():
+        host = pt.WORKDIR / f"{name}_src.prg"
+        host.write_bytes(c64_basic_prg.compile_basic(src, "mdbasic", 0x0801))
+        entries.append((name, host))
     pt.make_work_d81(OUT_D81, entries)
     proc = pt.boot(port, crt, OUT_D81)
     try:
