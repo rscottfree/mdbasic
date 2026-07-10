@@ -151,14 +151,20 @@ def build_cart() -> tuple[Path, int]:
     move = asm("move_tool.asm", "/tmp/move.prg")
     copy = asm("copy_tool.asm", "/tmp/copy.prg")
     convert = asm("convert_tool.asm", "/tmp/convert.prg")
-    # package tool: assemble its boot stub, regenerate the embed include,
-    # assemble the tool, patch the newvec/initclk sentinels from the listing
+    # package tool: assemble its boot + crunch stubs, regenerate the embed
+    # includes, assemble the tool, patch the newvec/initclk sentinels from
+    # the listing
     packstub = asm("pack_stub.asm", "/tmp/pack_stub.prg")
+    crunchstub = asm("crunch_stub.asm", "/tmp/crunch_stub.prg")
     (ROOT / "build").mkdir(exist_ok=True)
     Path("/tmp/pack_stub.bin").write_bytes(packstub)
+    Path("/tmp/crunch_stub.bin").write_bytes(crunchstub)
     subprocess.run([sys.executable, str(ROOT / "tools/bin2inc.py"),
                     "/tmp/pack_stub.bin", str(ROOT / "build/pack_stub.inc"),
                     "stubtpl"], check=True)
+    subprocess.run([sys.executable, str(ROOT / "tools/bin2inc.py"),
+                    "/tmp/crunch_stub.bin", str(ROOT / "build/crunch_stub.inc"),
+                    "crunchtpl"], check=True)
     pack = asm("pack_tool.asm", "/tmp/pack.prg")
     pack = make_crt.patch_pack_tool(pack, Path("/tmp/mdbasic.lst"))
     build_docs.pack(ROOT / "build/docs.bin")

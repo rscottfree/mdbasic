@@ -73,12 +73,14 @@ STUB_PATH = Path(__file__).with_name("cart_boot.bin")
 
 
 def patch_pack_tool(pack: bytes, mdbasic_lst: Path) -> bytes:
-    """Patch the package tool's embedded boot-stub sentinels (jsr $caf1/$caf2)
-    with the real newvec/initclk addresses from the mdbasic listing."""
+    """Patch the package tool's embedded stub sentinels (jsr $caf1/$caf2)
+    with the real newvec/initclk addresses from the mdbasic listing. The tool
+    embeds two stub templates (pack_stub + crunch_stub), one hit each."""
     import pack_prg
     return pack_prg.patch_stub_syms(pack,
                                     pack_prg.lst_label_addr(mdbasic_lst, "newvec"),
-                                    pack_prg.lst_label_addr(mdbasic_lst, "initclk"))
+                                    pack_prg.lst_label_addr(mdbasic_lst, "initclk"),
+                                    expect=2)
 
 
 def _chip_packet(bank: int, data: bytes) -> bytes:

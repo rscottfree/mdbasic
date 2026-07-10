@@ -5,9 +5,10 @@ self-contained auto-run PRGs by the REAL in-emulator PACKAGE tool, alongside
 the sprite/font data files those programs load at runtime.
 
 One cart VICE session loads each example from the D81 and drives the packager
-(dopack entry) to write "<NAME>+" back to the same disk. Afterwards each
-packaged PRG (where the example has observable output) is booted on a
-cartridge-less VICE with LOAD"<NAME>+",8,1 and its behaviour asserted.
+(dopack entry) to write "<NAME>+" back to the same disk (plus "<NAME>+C"
+crunched variants for a sample). Afterwards each packaged PRG (where the
+example has observable output) is booted on a cartridge-less VICE with
+LOAD"<NAME>+",8,1 and its behaviour asserted.
 
     tools/vice_pack_examples.py [--skip-verify]
 """
@@ -44,12 +45,24 @@ EXAMPLES = [
 ]
 DATA_FILES = ["bird.spr", "font1", "font2", "font3", "font4", "font5"]
 
+# Crunched variants (PACKAGE tool, Y at the crunch prompt): a sample of the
+# above written alongside as "<NAME>+C" -- same auto-run contract, smaller
+# file.
+CRUNCHED = [
+    ("num functions", "C000"),
+    ("demo1", "SIMPLE SPRITE DEMO"),
+]
+
 # Not on the template D64: compiled from vice_pack_list_test's source instead.
 COMPILED = {"pklist": plt.SRC}
 
 
 def packaged_name(example: str) -> str:
     return example.upper() + "+"
+
+
+def crunched_name(example: str) -> str:
+    return example.upper() + "+C"
 
 
 def build_disk_and_package(crt, dopack, port) -> None:
@@ -70,15 +83,19 @@ def build_disk_and_package(crt, dopack, port) -> None:
             print(f"  packaging {name!r} -> {packaged_name(name)!r}")
             pt.load_program(port, name)
             pt.package_one(port, dopack, packaged_name(name))
+        for name, _ in CRUNCHED:
+            print(f"  crunching {name!r} -> {crunched_name(name)!r}")
+            pt.load_program(port, name)
+            pt.package_one(port, dopack, crunched_name(name), crunch=True)
     finally:
         harness.shutdown_vice_on_port(proc, port)
 
 
-def verify_one(port, name, expect) -> dict[str, bool]:
+def verify_one(port, name, expect, key=None) -> dict[str, bool]:
     """Boot plain VICE with the deliverable disk and auto-run one packaged
     program."""
     results = {}
-    key = packaged_name(name)
+    key = key or packaged_name(name)
     proc = pt.boot(port, None, OUT_D81)
     try:
         harness.connect_monitor(port, 20.0).close()
@@ -141,6 +158,9 @@ def main() -> int:
     for name, _ in EXAMPLES:
         results[f"{packaged_name(name)} on disk"] = (
             f'"{name.lower()}+"' in listing)
+    for name, _ in CRUNCHED:
+        results[f"{crunched_name(name)} on disk"] = (
+            f'"{name.lower()}+c"' in listing)
 
     if not skip_verify:
         print("-- verifying packaged programs on a cartridge-less machine --")
@@ -152,6 +172,10 @@ def main() -> int:
                 continue
             print(f"  running {packaged_name(name)!r}")
             results.update(verify_one(next(port_iter), name, expect))
+        for name, expect in CRUNCHED:
+            print(f"  running {crunched_name(name)!r}")
+            results.update(verify_one(next(port_iter), name, expect,
+                                      key=crunched_name(name)))
 
     for k, v in results.items():
         print(f"  {'PASS' if v else 'FAIL'}  {k}")

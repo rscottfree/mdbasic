@@ -23,9 +23,16 @@ Packaged file layout (load address $0302):
     progend-    : the 16K MDBASIC image ($8000-$bfff body); the boot stub
                   copies it up to $8000 after load
 
+Crunched variant (--crunch): the same content, LZ-compressed into a smaller
+self-extracting PRG (see build_crunched below for the layout and lz_crunch for
+the format). The compressor here and the 6502 one in pack_tool.asm implement
+the identical algorithm, so crunched files stay byte-comparable too.
+
 Usage:
     tools/pack_prg.py --image mdbasic.prg --lst build/mdbasic.lst \
         --stub build/pack_stub.bin program.prg out.prg
+    tools/pack_prg.py --image mdbasic.prg --lst build/mdbasic.lst \
+        --crunch --crunch-stub build/crunch_stub.bin program.prg out.prg
 """
 from __future__ import annotations
 
@@ -76,6 +83,298 @@ VECTOR_BLOCK = bytes([
 BANNER = "MDBASIC PACKAGED PROGRAM"
 BANNER_ROW = 12
 
+# ---- crunched-variant layout (keep in sync with crunch_stub.asm) ----
+CRUNCH_STUB_LOAD = 0x0600    # self-extraction stub (IMAIN points here)
+CRUNCH_STUB_MAX = 0x0200     # $0600-$07ff
+PAYLOAD_LOAD = 0x0803        # compressed payload, after the $0801 $00,$00
+                             # empty-program decoy that keeps the load-time
+                             # relink walk off the payload
+PAYLOAD_TOP = 0xFFF9         # stub relocates the payload so its last byte
+                             # lands here; $fffa-$ffff hold planted RAM
+                             # NMI/RESET/IRQ vectors during decrunch
+FILE_END_MAX = 0xD000        # a PRG loading past $cfff would write into I/O
+
+# ---- LZ crunch format ----
+# Bit-interleaved LZSS, shared bit-for-bit by three implementations:
+# lz_crunch/lz_decrunch here, the native 6502 encoder in pack_tool.asm, and
+# the decoder in crunch_stub.asm. The encoder is deliberately deterministic
+# (greedy parse, fixed hash, fixed chain-walk order and depth) so the native
+# tool's output is byte-identical to this oracle.
+#
+# One stream carries whole bytes and control bits. Control bits come from a
+# reservoir byte that both sides fetch/emit inline: the encoder appends a
+# placeholder byte at the moment it writes a bit into an empty reservoir; the
+# decoder fetches its reservoir byte at the moment it reads a bit from an
+# empty one -- consumption orders are identical, so positions align. Bits fill
+# each reservoir byte MSB-first; whole bytes (literals, offset low bytes) are
+# appended/read at the stream cursor between bits.
+#
+# Item = control bit: 1 = literal (one whole byte), 0 = match:
+#   offset-type bit: 0 = short (whole byte = off-1, offsets 1-256),
+#                    1 = long (4 reservoir bits = (off-1) >> 8, then a whole
+#                        byte = (off-1) low; offsets 257-4096)
+#   then Elias-gamma(len-1), MSB-first (bitlen-1 zeros, then the value's
+#   bits from its leading 1); lengths 2-255. Matches copy from the already-
+#   decoded output; off < len (self-overlap/RLE) is allowed.
+#
+# Container (the file payload) = per chunk: dest u16le, outlen u16le, stream
+# (reservoir starts empty per chunk); terminated by dest = $0000. Chunks are
+# compressed independently.
+CRUNCH_WINDOW = 4096
+CRUNCH_MINMATCH = 2
+CRUNCH_MAXMATCH = 255
+CRUNCH_DEPTH = 64            # candidates examined per position
+CRUNCH_NIL = 0xFFFF
+
+
+def _crunch_hash(b0: int, b1: int) -> int:
+    return (b0 + (b1 << 2)) & 0x3FF
+
+
+def _gamma(value: int) -> list[int]:
+    """Elias gamma bits for value >= 1, MSB-first with leading zeros."""
+    n = value.bit_length() - 1
+    return [0] * n + [(value >> i) & 1 for i in range(n, -1, -1)]
+
+
+class _BitWriter:
+    """The interleaved stream writer (see the format comment)."""
+
+    def __init__(self) -> None:
+        self.out = bytearray()
+        self.res_idx = -1        # position of the open reservoir byte
+        self.res_bits = 0        # bits already in it
+
+    def put_bit(self, bit: int) -> None:
+        if self.res_bits == 0:
+            self.res_idx = len(self.out)
+            self.out.append(0)
+            self.res_bits = 8
+        self.res_bits -= 1
+        if bit:
+            self.out[self.res_idx] |= 1 << self.res_bits
+
+    def put_bits(self, bits: list[int]) -> None:
+        for b in bits:
+            self.put_bit(b)
+
+    def put_byte(self, val: int) -> None:
+        self.out.append(val)
+
+
+def lz_crunch(data: bytes) -> bytes:
+    """Compress one chunk. Match finder: 1024-bucket hash of the 2-byte
+    prefix, per-position chain table indexed pos & $0fff (slots are unique
+    within the 4096-byte window), most-recent-first walk capped at
+    CRUNCH_DEPTH; ties keep the earlier (nearer) candidate."""
+    head = [CRUNCH_NIL] * 1024
+    chain = [CRUNCH_NIL] * 4096
+    n = len(data)
+
+    def insert(p: int) -> None:
+        if p + CRUNCH_MINMATCH <= n:
+            h = _crunch_hash(data[p], data[p + 1])
+            chain[p & 0xFFF] = head[h]
+            head[h] = p
+
+    w = _BitWriter()
+    pos = 0
+    while pos < n:
+        best_len = 0
+        best_off = 0
+        maxl = min(CRUNCH_MAXMATCH, n - pos)
+        if n - pos >= CRUNCH_MINMATCH:
+            cand = head[_crunch_hash(data[pos], data[pos + 1])]
+            for _ in range(CRUNCH_DEPTH):
+                if cand == CRUNCH_NIL or pos - cand > CRUNCH_WINDOW:
+                    break
+                l = 0
+                while l < maxl and data[cand + l] == data[pos + l]:
+                    l += 1
+                if l > best_len:
+                    best_len, best_off = l, pos - cand
+                if l == maxl:
+                    break
+                cand = chain[cand & 0xFFF]
+        if best_len >= CRUNCH_MINMATCH:
+            om1 = best_off - 1
+            w.put_bit(0)
+            if om1 < 256:
+                w.put_bit(0)
+            else:
+                w.put_bit(1)
+                w.put_bits([(om1 >> (8 + i)) & 1 for i in (3, 2, 1, 0)])
+            w.put_byte(om1 & 0xFF)
+            w.put_bits(_gamma(best_len - 1))
+            for p in range(pos, pos + best_len):
+                insert(p)
+            pos += best_len
+        else:
+            w.put_bit(1)
+            w.put_byte(data[pos])
+            insert(pos)
+            pos += 1
+    return bytes(w.out)
+
+
+class _BitReader:
+    def __init__(self, stream: bytes) -> None:
+        self.stream = stream
+        self.rd = 0
+        self.res = 0
+        self.res_bits = 0
+
+    def get_bit(self) -> int:
+        if self.res_bits == 0:
+            self.res = self.stream[self.rd]
+            self.rd += 1
+            self.res_bits = 8
+        self.res_bits -= 1
+        return (self.res >> self.res_bits) & 1
+
+    def get_byte(self) -> int:
+        b = self.stream[self.rd]
+        self.rd += 1
+        return b
+
+    def get_gamma(self) -> int:
+        n = 0
+        while self.get_bit() == 0:
+            n += 1
+        v = 1
+        for _ in range(n):
+            v = (v << 1) | self.get_bit()
+        return v
+
+
+def _decode_items(stream: bytes, outlen: int):
+    """Yield (kind, payload) per item while decoding; kind 'L' -> the byte,
+    'M' -> (off, length). The caller accumulates output; used stream bytes
+    are available afterwards via the returned reader (see lz_decrunch)."""
+    r = _BitReader(stream)
+    produced = 0
+    while produced < outlen:
+        if r.get_bit():
+            yield r, "L", r.get_byte()
+            produced += 1
+        else:
+            hi = 0
+            if r.get_bit():
+                for _ in range(4):
+                    hi = (hi << 1) | r.get_bit()
+            om1 = (hi << 8) | r.get_byte()
+            length = r.get_gamma() + 1
+            yield r, "M", (om1 + 1, length)
+            produced += length
+    if produced != outlen:
+        raise ValueError("chunk overran its outlen")
+
+
+def lz_decrunch(stream: bytes, outlen: int) -> tuple[bytes, int]:
+    """Decode one chunk; returns (data, stream bytes consumed)."""
+    out = bytearray()
+    reader = None
+    for reader, kind, payload in _decode_items(stream, outlen):
+        if kind == "L":
+            out.append(payload)
+        else:
+            off, length = payload
+            for _ in range(length):
+                out.append(out[-off])
+    if len(out) != outlen:
+        raise ValueError("chunk overran its outlen")
+    return bytes(out), reader.rd if reader else 0
+
+
+def crunch_payload(chunks: list[tuple[int, bytes]]) -> bytes:
+    """The file payload: [dest u16le, outlen u16le, stream]... + $0000."""
+    out = bytearray()
+    for dest, data in chunks:
+        out += dest.to_bytes(2, "little")
+        out += len(data).to_bytes(2, "little")
+        out += lz_crunch(data)
+    out += b"\x00\x00"
+    return bytes(out)
+
+
+def _assert_decrunch_safe(payload: bytes, chunks: list[tuple[int, bytes]]) -> None:
+    """Simulate the stub's in-memory decrunch and prove the forward decode
+    never writes over unread payload bytes.
+
+    The stub relocates the payload so its last byte sits at PAYLOAD_TOP, then
+    decodes forward. Walk the token stream tracking the read cursor and every
+    write, requiring writes to stay strictly below the read cursor. The
+    analytic bound (payload below $8000, output capped at $c000, worst-case
+    1-flag-bit-per-literal expansion) leaves >8K of slack for any packageable
+    program; this check makes it concrete per file."""
+    base = PAYLOAD_TOP + 1 - len(payload)
+    rd = 0
+    min_slack = 1 << 16
+    for dest, data in chunks:
+        exp_dest = int.from_bytes(payload[rd:rd + 2], "little")
+        outlen = int.from_bytes(payload[rd + 2:rd + 4], "little")
+        if (exp_dest, outlen) != (dest, len(data)):
+            raise ValueError("payload does not match chunk list")
+        rd += 4
+        decoded, used = lz_decrunch(payload[rd:], outlen)
+        if decoded != data:
+            raise ValueError("crunch round-trip failed")
+        # item-level pointer walk: after each item, everything written so far
+        # must sit strictly below the read cursor
+        wr = dest
+        for reader, kind, item in _decode_items(payload[rd:], outlen):
+            wr += 1 if kind == "L" else item[1]
+            slack = (base + rd + reader.rd) - wr
+            min_slack = min(min_slack, slack)
+        rd += used
+    if min_slack < 0x100:
+        raise ValueError(f"decrunch overlap slack too small ({min_slack})")
+
+
+def build_crunched(program: bytes, image: bytes, crunch_stub: bytes) -> bytes:
+    """Assemble the crunched packaged PRG (including the load address).
+
+    Layout (load address $0302):
+        $0302-$0303 : IMAIN -> the crunch stub at $0600
+        $0304-$0333 : the standard vector block (same as the plain variant)
+        $0334-$03ff : zero fill (cassette buffer, unused on a stock machine)
+        $0400-$05ff : screen rows 0-12: blanks + the banner row
+        $0600-$07ff : crunch_stub.asm (self-extraction), space-padded
+        $0800       : $00 (byte before BASIC text)
+        $0801-$0802 : $00,$00 -- an empty program, so the load-time relink
+                      stops immediately instead of walking the payload
+        $0803-      : compressed payload (program chunk, image chunk, $0000)
+
+    The stub needs no per-file patching: it finds the payload end in the
+    KERNAL's load-end pointer $ae/$af and the chunk geometry in the payload
+    itself (VARTAB comes from the write cursor after the program chunk).
+    """
+    if len(image) != IMAGE_SIZE:
+        raise ValueError(f"image must be {IMAGE_SIZE} bytes, got {len(image)}")
+    if len(crunch_stub) > CRUNCH_STUB_MAX:
+        raise ValueError(f"crunch stub is {len(crunch_stub)} bytes, "
+                         f"max {CRUNCH_STUB_MAX}")
+    program = relink(program)
+    chunks = [(BASIC_LOAD, program), (IMAGE_LOAD, image)]
+    payload = crunch_payload(chunks)
+    _assert_decrunch_safe(payload, chunks)
+
+    out = bytearray()
+    out += FILE_LOAD.to_bytes(2, "little")           # PRG load address
+    out += CRUNCH_STUB_LOAD.to_bytes(2, "little")    # $0302 IMAIN -> stub
+    out += VECTOR_BLOCK                              # $0304-$0333
+    out += b"\x00" * (0x0400 - STUB_LOAD)            # $0334-$03ff
+    out += screen_fill()[:0x200]                     # $0400-$05ff (banner row)
+    out += crunch_stub.ljust(CRUNCH_STUB_MAX, b"\x20")  # $0600-$07ff
+    out += b"\x00"                                   # $0800
+    out += b"\x00\x00"                               # $0801 empty-program decoy
+    out += payload                                   # $0803-
+    end = FILE_LOAD + len(out) - 2
+    if end > FILE_END_MAX:
+        raise ValueError(f"crunched file ends at ${end:04x}, past "
+                         f"${FILE_END_MAX:04x}")
+    return bytes(out)
+
 
 def lst_label_addr(lst_path: Path, label: str) -> int:
     """Resolve a label's address from a tmpx listing: the label sits on its
@@ -92,22 +391,26 @@ def lst_label_addr(lst_path: Path, label: str) -> int:
     raise RuntimeError(f"label {label!r} not found in {lst_path}")
 
 
-def _patch_jsr(stub: bytearray, sentinel: int, target: int) -> None:
+def _patch_jsr(stub: bytearray, sentinel: int, target: int, expect: int) -> None:
     pat = bytes([0x20, sentinel & 0xFF, sentinel >> 8])
     hits = [i for i in range(len(stub) - 2) if bytes(stub[i:i + 3]) == pat]
-    if len(hits) != 1:
-        raise RuntimeError(f"expected one jsr ${sentinel:04x} in stub, "
+    if len(hits) != expect:
+        raise RuntimeError(f"expected {expect} jsr ${sentinel:04x} in stub, "
                            f"found {len(hits)}")
-    stub[hits[0] + 1] = target & 0xFF
-    stub[hits[0] + 2] = target >> 8
+    for hit in hits:
+        stub[hit + 1] = target & 0xFF
+        stub[hit + 2] = target >> 8
 
 
-def patch_stub_syms(blob: bytes, newvec: int, initclk: int) -> bytes:
+def patch_stub_syms(blob: bytes, newvec: int, initclk: int,
+                    expect: int = 1) -> bytes:
     """Patch the newvec/initclk jsr sentinels with real addresses. `blob` is
-    either the bare stub or a binary embedding it (pack_tool.bin)."""
+    either a bare stub (expect=1) or a binary embedding several, like
+    pack_tool.bin with both the plain and the crunch stub templates
+    (expect=2)."""
     out = bytearray(blob)
-    _patch_jsr(out, NEWVEC_SENTINEL, newvec)
-    _patch_jsr(out, INITCLK_SENTINEL, initclk)
+    _patch_jsr(out, NEWVEC_SENTINEL, newvec, expect)
+    _patch_jsr(out, INITCLK_SENTINEL, initclk, expect)
     return bytes(out)
 
 
@@ -193,15 +496,29 @@ def main() -> int:
                         help="MDBASIC image PRG ($8000, 16K body)")
     parser.add_argument("--lst", type=Path, required=True,
                         help="mdbasic.lst for newvec/initclk addresses")
-    parser.add_argument("--stub", type=Path, required=True,
+    parser.add_argument("--stub", type=Path,
                         help="assembled pack_stub binary (raw, for $0334)")
+    parser.add_argument("--crunch", action="store_true",
+                        help="write the LZ-crunched self-extracting variant")
+    parser.add_argument("--crunch-stub", type=Path,
+                        help="assembled crunch_stub binary (raw, for $0600; "
+                             "required with --crunch)")
     args = parser.parse_args()
 
-    stub = patch_stub_syms(args.stub.read_bytes(),
-                           lst_label_addr(args.lst, "newvec"),
-                           lst_label_addr(args.lst, "initclk"))
-    out = build_packaged(load_program_prg(args.program),
-                         load_image_prg(args.image), stub)
+    newvec = lst_label_addr(args.lst, "newvec")
+    initclk = lst_label_addr(args.lst, "initclk")
+    if args.crunch:
+        if not args.crunch_stub:
+            parser.error("--crunch requires --crunch-stub")
+        stub = patch_stub_syms(args.crunch_stub.read_bytes(), newvec, initclk)
+        out = build_crunched(load_program_prg(args.program),
+                             load_image_prg(args.image), stub)
+    else:
+        if not args.stub:
+            parser.error("--stub is required (or use --crunch)")
+        stub = patch_stub_syms(args.stub.read_bytes(), newvec, initclk)
+        out = build_packaged(load_program_prg(args.program),
+                             load_image_prg(args.image), stub)
     args.out.write_bytes(out)
     print(f"packaged {args.out} ({len(out)} bytes)")
     return 0

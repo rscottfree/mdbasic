@@ -100,13 +100,16 @@ if [ -f "$ROOT/mdbasic.pdf" ] && command -v pdftotext >/dev/null 2>&1; then
     tail -c +3 "$OUTDIR/copy_tool.prg" > "$COPY"
     tmpx -i "$ROOT/convert_tool.asm" -o "$OUTDIR/convert_tool.prg" >/dev/null
     tail -c +3 "$OUTDIR/convert_tool.prg" > "$CONVERT"
-    # package tool: boot stub first (pack_tool.asm embeds it via the
-    # generated build/pack_stub.inc; make_crt.py patches its newvec/initclk
-    # sentinels from the fresh listing)
+    # package tool: boot + crunch stubs first (pack_tool.asm embeds them via
+    # the generated build/pack_stub.inc + build/crunch_stub.inc; make_crt.py
+    # patches their newvec/initclk sentinels from the fresh listing)
     tmpx -i "$ROOT/pack_stub.asm" -o "$OUTDIR/pack_stub.prg" >/dev/null
     tail -c +3 "$OUTDIR/pack_stub.prg" > "$OUTDIR/pack_stub.bin"
+    tmpx -i "$ROOT/crunch_stub.asm" -o "$OUTDIR/crunch_stub.prg" >/dev/null
+    tail -c +3 "$OUTDIR/crunch_stub.prg" > "$OUTDIR/crunch_stub.bin"
     mkdir -p "$ROOT/build"
     python3 "$ROOT/tools/bin2inc.py" "$OUTDIR/pack_stub.bin" "$ROOT/build/pack_stub.inc" stubtpl
+    python3 "$ROOT/tools/bin2inc.py" "$OUTDIR/crunch_stub.bin" "$ROOT/build/crunch_stub.inc" crunchtpl
     tmpx -i "$ROOT/pack_tool.asm" -o "$OUTDIR/pack_tool.prg" >/dev/null
     tail -c +3 "$OUTDIR/pack_tool.prg" > "$PACK"
     python3 "$ROOT/tools/build_docs.py" --pack "$OUTDIR/docs.bin" >/dev/null
