@@ -36,7 +36,7 @@ EXAMPLES = [
     ("bubblesort", "RUNTIME:"),
     ("num functions", "C000"),
     ("trim$test", "THIS IS A TRIM$ TEST"),
-    ("linetest", None),            # verified via bitmap-mode probe
+    ("linetest", None),            # verified via bitmap mode/drawn RAM probe
     ("gamesounds", "GAME-LIKE SOUNDS"),
 ]
 DATA_FILES = ["bird.spr", "font1", "font2", "font3", "font4", "font5"]
@@ -93,7 +93,16 @@ def verify_one(port, name, expect) -> dict[str, bool]:
                 if pt.mem_on_port(port, 0xD011, 0xD011)[0] & 0x20:
                     ok = True
                     break
-                time.sleep(2.0)
+                # In warp mode this short drawing demo can enter bitmap mode,
+                # finish, and have MDBASIC's immediate loop restore text mode
+                # before the first host-side VIC probe.  Its completed bitmap
+                # remains in RAM under the KERNAL, so accept that deterministic
+                # result as well as observing the transient mode bit.
+                if pt.mem_on_port(port, 0xE000, 0xE007, bank=1) == bytes.fromhex(
+                        "55 5a 5a 7a 7d 7f 7f 7f"):
+                    ok = True
+                    break
+                time.sleep(0.2)
             results[f"{key} bitmap"] = ok
         elif name == "fonttest":
             # runs ~10s of WAITs through five font loads, then SCREEN0/READY

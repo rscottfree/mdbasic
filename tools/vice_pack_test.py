@@ -11,7 +11,10 @@ The written file is also byte-compared against tools/pack_prg.py (the host-
 side twin): sections built from the same program bytes, boot stub, and the
 $8000-$BFFF RAM snapshot taken just before packaging (with the $8002/$8003
 menu-handler unpatch the tool must perform, verified against the pristine
-image too).
+image too).  A persistent-environment regression then interrupts an auto-run
+through the KERNAL STOP path and proves the standalone machine can LIST with
+MDBASIC decoding, use the function-key environment, edit, SAVE a plain source
+PRG, RUN, NEW/LOAD, LIST, and RUN that saved source again.
 
 VICE 3.10 notes: the binary monitor pauses the machine while a connection is
 open, so all polling here uses short-lived connections; a D81 needs an
@@ -32,6 +35,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import vice_prg_test as harness
 import vice_docs_test as dt
 import pack_prg
+import c64_basic_prg
 
 BASEPORT = 6980
 WORKDIR = Path("/tmp/mdbasic_pack_test")
@@ -304,6 +308,157 @@ def t_package_and_run(crt, dopack, domenu, next_port):
     return results
 
 
+def t_persistent_environment(crt, dopack, domenu, next_port):
+    """A standalone package remains a complete MDBASIC development session.
+
+    Auto-run an endless MDBASIC program, force the same STOP result that the
+    physical RUN/STOP key returns through $FFE1, then LIST, edit, SAVE, RUN,
+    NEW/LOAD, LIST and RUN the saved source.  The custom-token text and every
+    resident hook are checked after the break, where a half-installed package
+    would fall back to BASIC V2 behaviour.
+    """
+    results = {}
+    src = """\
+10 SCREEN CLR
+20 PRINT "PACKAGED START"
+30 GOTO 30
+"""
+    source_prg = WORKDIR / "env_source.prg"
+    source_prg.write_bytes(c64_basic_prg.compile_basic(src, "mdbasic", 0x0801))
+    disk = make_work_d81(WORKDIR / "environment.d81",
+                         [("env source", source_prg)])
+    hook_addresses = (0x028F, 0x0300, 0x0302, 0x0304, 0x0306,
+                      0x0308, 0x030A, 0x0316, 0x0330, 0x0332)
+    reference_hooks = {}
+
+    # Create the package with the real cartridge-side tool.
+    port = next_port()
+    proc = boot(port, crt, disk)
+    try:
+        harness.connect_monitor(port, 20.0).close()
+        wait_screen_on_port(port, ["READY."], 30.0)
+        load_program(port, "env source")
+        package_one(port, dopack, "ENVPKG")
+        reference_hooks = {
+            address: mem_on_port(port, address, address + 1)
+            for address in hook_addresses
+        }
+    finally:
+        harness.shutdown_vice_on_port(proc, port)
+
+    port = next_port()
+    proc = boot(port, None, disk)
+    saved_program = b""
+    try:
+        harness.connect_monitor(port, 20.0).close()
+        wait_screen_on_port(port, ["READY."], 30.0)
+        harness.keyboard_type_on_port(port, 'LOAD"ENVPKG",8,1\r')
+        ok, _ = wait_screen_on_port(port, ["PACKAGED START"], 180.0,
+                                    interval=2.0)
+        results["environment_package_autoruns"] = ok
+
+        # $FFE1 dispatches through ISTOP.  Point it briefly at LDA #0 / RTS in
+        # unused cassette-buffer space: this is exactly the Z=1 result a real
+        # RUN/STOP keypress returns, without relying on host keyboard mapping.
+        s = harness.connect_monitor(port, 20.0)
+        harness.mem_set(s, 0x03F0, b"\xa9\x00\x60")
+        harness.mem_set(s, 0x0328, b"\xf0\x03")
+        s.close()
+        ok, _ = wait_screen_on_port(port, ["BREAK IN 30", "READY."], 30.0)
+        results["runstop_break_returns_ready"] = ok
+        # Restore the stock STOP target before testing the persistent session.
+        s = harness.connect_monitor(port, 20.0)
+        harness.mem_set(s, 0x0328, b"\xed\xf6")
+        s.close()
+
+        packaged_hooks = {
+            address: mem_on_port(port, address, address + 1)
+            for address in hook_addresses
+        }
+        for address in hook_addresses:
+            if packaged_hooks[address] != reference_hooks[address]:
+                actual = int.from_bytes(packaged_hooks[address], "little")
+                expected = int.from_bytes(reference_hooks[address], "little")
+                print(f"    vector ${address:04x}: ${actual:04x}, "
+                      f"traditional MDBASIC has ${expected:04x}")
+        results["all_mdbasic_hooks_survive_break"] = (
+            packaged_hooks == reference_hooks)
+        results["function_key_gate_survives_break"] = (
+            mem_on_port(port, 0x009D, 0x009D) == b"\x80"
+            and mem_on_port(port, 0x028A, 0x028A) == b"\x80")
+
+        # LIST must use MDBASIC's decoder (stock BASIC prints SCREEN's $e7 as
+        # a pi glyph/control code).  KEY LIST also proves the high-RAM function
+        # key table and command dispatcher remain live.
+        harness.keyboard_type_on_port(port, "LIST\r")
+        ok, _ = wait_screen_on_port(port,
+                                    ["10 SCREEN CLR",
+                                     '20 PRINT "PACKAGED START"',
+                                     "30 GOTO 30", "READY."], 30.0)
+        results["list_uses_mdbasic_decoder_after_break"] = ok
+        harness.keyboard_type_on_port(port, "KEY LIST\r")
+        ok, _ = wait_screen_on_port(port, ['KEY1,"LIST"',
+                                           'KEY8,"SCREENCLR"'], 30.0)
+        results["function_key_environment_survives_break"] = ok
+
+        # Edit with a custom function, replace the endless loop with END, and
+        # save a normal $0801 MDBASIC source PRG (not another package).
+        harness.keyboard_type_on_port(
+            port, '20 PRINT"EDITED ";HEX$(48879)\r30 END\r')
+        time.sleep(1.0)
+        harness.keyboard_type_on_port(port, 'SAVE"ENVSRC",8\r')
+        ok, _ = wait_screen_on_port(port, ["SAVING ENVSRC", "READY."], 90.0,
+                                    interval=1.0)
+        results["edited_source_saves"] = ok
+
+        harness.keyboard_type_on_port(port, "RUN\r")
+        ok, _ = wait_screen_on_port(port, ["EDITED BEEF", "READY."], 30.0)
+        results["edited_program_runs_to_ready"] = ok
+
+        # Throw away RAM text, load the just-saved conventional source, list it
+        # with extension keywords, and run it again in the same environment.
+        harness.keyboard_type_on_port(port, "NEW\r")
+        time.sleep(1.0)
+        load_program(port, "envsrc")
+        harness.keyboard_type_on_port(port, "LIST\r")
+        ok, _ = wait_screen_on_port(port, ["10 SCREEN CLR", "HEX$(48879)",
+                                           "30 END", "READY."], 30.0)
+        results["saved_source_reloads_and_lists"] = ok
+        harness.keyboard_type_on_port(port, "RUN\r")
+        ok, _ = wait_screen_on_port(port, ["EDITED BEEF", "READY."], 30.0)
+        results["saved_source_reruns"] = ok
+
+        vt = mem_on_port(port, 0x2D, 0x2E)
+        vartab = vt[0] | vt[1] << 8
+        saved_program = mem_on_port(port, 0x0801, vartab - 1)
+    finally:
+        harness.shutdown_vice_on_port(proc, port)
+
+    # The file emitted from the standalone session must also be an ordinary
+    # MDBASIC source program when loaded by a fresh, traditional cart install.
+    port = next_port()
+    proc = boot(port, crt, disk)
+    try:
+        harness.connect_monitor(port, 20.0).close()
+        wait_screen_on_port(port, ["READY."], 30.0)
+        load_program(port, "envsrc")
+        harness.keyboard_type_on_port(port, "LIST\r")
+        ok, _ = wait_screen_on_port(port, ["10 SCREEN CLR", "HEX$(48879)",
+                                           "30 END", "READY."], 30.0)
+        results["saved_source_lists_in_traditional_mdbasic"] = ok
+        harness.keyboard_type_on_port(port, "RUN\r")
+        ok, _ = wait_screen_on_port(port, ["EDITED BEEF", "READY."], 30.0)
+        results["saved_source_runs_in_traditional_mdbasic"] = ok
+    finally:
+        harness.shutdown_vice_on_port(proc, port)
+
+    actual_source = read_back(disk, "envsrc", WORKDIR / "envsrc.prg")
+    results["saved_file_is_plain_source_prg"] = (
+        actual_source[:2] == b"\x01\x08"
+        and actual_source[2:] == saved_program)
+    return results
+
+
 def t_overwrite(crt, dopack, domenu, next_port):
     """Packaging onto an existing filename overwrites it cleanly."""
     results = {}
@@ -394,6 +549,7 @@ def t_datafile(crt, dopack, domenu, next_port):
 REGISTRY = [
     ("menu", t_menu),
     ("package_and_run", t_package_and_run),
+    ("persistent_environment", t_persistent_environment),
     ("overwrite", t_overwrite),
     ("datafile", t_datafile),
 ]
