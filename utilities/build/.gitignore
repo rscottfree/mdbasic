@@ -1,0 +1,8 @@
+# build_disk.sh output. Intermediates are ignored; the four final distributables
+# are tracked so a fresh clone is ready to run.
+*
+!.gitignore
+!mdbasic.crt
+!mdbasic.d64
+!mdbasic.d81
+!mdbasic.prg

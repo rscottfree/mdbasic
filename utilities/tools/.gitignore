@@ -1,0 +1,3 @@
+# The frozen loader stub, regenerated from ../src/boot.asm by build_disk.sh.
+# (Python bytecode is ignored subtree-wide by utilities/.gitignore.)
+cart_boot.bin

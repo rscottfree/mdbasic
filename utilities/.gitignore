@@ -1,0 +1,9 @@
+# Python bytecode cache (tests import sibling modules).
+__pycache__/
+*.pyc
+
+# Personal / local-only, kept out of the repo.
+# Ultimate 64 deploy helper (reads ~/.u64.yaml):
+tools/u64_upload.sh
+# archived design notes for shipped features:
+docs/plans/
