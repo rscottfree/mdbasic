@@ -144,19 +144,14 @@ def sys_stub(port, target):
     harness.keyboard_type_on_port(port, f"SYS{dt.STUB_ADDR}\r")
 
 
-def package_one(port, dopack, outname, write_timeout=300.0, crunch=False):
-    """Drive one packaging run: dopack entry -> filename -> crunch? y/n ->
-    wait for DONE. -> keypress back to READY. Returns the status/DONE screen
-    text."""
+def package_one(port, dopack, outname, write_timeout=300.0):
+    """Drive one packaging run: dopack entry -> filename -> wait for DONE. ->
+    keypress back to READY. Returns the status/DONE screen text."""
     sys_stub(port, dopack)
     ok, scr = wait_screen_on_port(port, ["FILENAME:"], 30.0)
     if not ok:
         raise TimeoutError(f"packager prompt did not appear:\n{scr}")
     harness.keyboard_type_on_port(port, outname + "\r")
-    ok, scr = wait_screen_on_port(port, ["CRUNCH? (Y/N)"], 30.0)
-    if not ok:
-        raise TimeoutError(f"crunch prompt did not appear:\n{scr}")
-    harness.keyboard_type_on_port(port, "Y" if crunch else "N")
     ok, scr = wait_screen_on_port(port, ["DONE."], write_timeout, interval=2.0)
     if not ok:
         raise TimeoutError(f"packager did not finish:\n{scr}")
