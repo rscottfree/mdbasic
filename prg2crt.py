@@ -2,6 +2,11 @@ import argparse
 import binascii
 import array
 
+# helper function to write binary data to the CRT file
+def writeHex(string):
+	global crtData
+	crtData += bytearray.fromhex(string)
+
 # command line parsing
 parser = argparse.ArgumentParser(description='Converts C64 PRG to a CRT file.')
 parser.add_argument('input.prg', action = 'store')
@@ -14,56 +19,44 @@ outputFilename = args.__dict__['output.crt']
 inputFile = open(inputFilename, 'rb')
 prg = bytearray(inputFile.read())
 
-# output data array
-crtData = bytearray() #crtData = b''
+# CRT signature (16 bytes)
+# "C64 CARTRIDGE   " C64 cartridge
+# "C128 CARTRIDGE  " C128 cartridge (added in v2.0)
+# "CBM2 CARTRIDGE  " CBMII cartridge (added in v2.0)
+# "VIC20 CARTRIDGE " VIC20 cartridge (added in v2.0)
+# "PLUS4 CARTRIDGE " C16/PLUS4 cartridge (added in v2.0)
+crtData = bytearray(b'C64 CARTRIDGE   ')
 
-# helper function to write binary data to the CRT file
-def writeHex(string):
-	global crtData
-	crtData += bytearray.fromhex(string)
-
-# CRT signature
-#         C  6  4     C  A  R  T  R  I  D  G  E
-writeHex('43 36 34 20 43 41 52 54 52 49 44 47 45 20 20 20')
-
-# header length (64 bytes)
+# header length (32-bit value = 64)
 writeHex('00 00 00 40')
 
-# cartridge version
+# cartridge version (2-byte value for v1.0 specs)
 writeHex('01 00')
 
-# cartridge hardware type: Magic Desk ID=19 ($13)
+# cartridge hardware type: (16-bit value = 19 ($13) for Magic Desk
 writeHex('00 13')
 
-# EXROM status
-writeHex('00')
-
-# GAME status
-writeHex('01')
+# EXROM and GAME line statuses
+#exrom/game status
+#  0    0   16k Game
+#  0    1    8k Game
+#  1    0    ultimax
+#  1    1    ram/off
+writeHex('00 00')
 
 # reserved
 writeHex('00 00 00 00 00 00')
 
-# cartridge name
-#         M  D  B  A  S  I  C
-writeHex('4d 44 42 41 53 49 43')
+# cartridge name (32 bytes)
+crtData += bytearray(b'MDBASIC')
 writeHex('00'*(32-7))
 
-# ROM content
-content = bytearray()
-
-# add loader (from "loader.bin" file)
-#loaderFile = open('loader.bin', 'rb')
-#loader = loaderFile.read()
-#content += bytearray(loader)
-#print ''.join( [ "%02X " % ord( x ) for x in loader ] ).strip()
-
+# Begin ROM content
 # add loader inline
-content += bytearray.fromhex(
-#  reset vector and run/stop vectors set to $8009
+content = bytearray.fromhex(
+# reset vector and run/stop vectors set to $8009
 	'09 80 09 80' +
-#  C  B  M  8  0
-	'C3 C2 CD 38 30' +
+	'C3 C2 CD 38 30' + # CBM80
 # assembly lanaguage routine at $8009 to load RAM from cartridge ROM then run
 # init BASIC
  '78'       + #sei
@@ -100,9 +93,10 @@ content += bytearray.fromhex(
  'A9 80'    + #lda #$80
  '85 5B'    + #sta $5B
  'A2 00'    + #ldx #0
- 'BD 59 80' + #lda $8059,x
+ 'BD 59 80' + #copy lda $8059,x
  '9D 00 04' + #sta $0400,x
- 'E8 D0 F7' + #inx bne
+ 'E8'       + #inx
+ 'D0 F7'    + #bne copy
  '4C 00 04' + #jmp $0400
  '00 00'    + #filler
 
@@ -111,33 +105,33 @@ content += bytearray.fromhex(
  '78'       + #sei
  'A2 00'    + #ldx #0
  'A5 57'    + #lda $57
- '8D 00 DE' + #sta $DE00
- 'A1 5A'    + #lda ($5A),x
+ '8D 00 DE' + #sta $DE00  ;bits 0-6 used to select mem bank
+ 'A1 5A'    + #loop1 lda ($5A),x
  '81 2D'    + #sta ($2D),x
  'E6 5A'    + #inc $5A
- 'D0 13'    + #bne 
+ 'D0 13'    + #bne go1
  'E6 5B'    + #inc $5B
  'A5 5B'    + #lda $5B
  'C9 A0'    + #cmp #$A0
- 'D0 0B'    + #bne
+ 'D0 0B'    + #bne go1
  'A9 80'    + #lda #$80
  '85 5B'    + #sta $5B
  'E6 57'    + #inc $57
  'A5 57'    + #lda $57
  '8D 00 DE' + #sta $DE00
- 'E6 2D'    + #inc $2D
- 'D0 02'    + #bne
+ 'E6 2D'    + #go1 inc $2D
+ 'D0 02'    + #bne go2
  'E6 2E'    + #inc $2E
- 'C6 58'    + #dec $58
- 'D0 DB'    + #bne
+ 'C6 58'    + #go2 dec $58
+ 'D0 DB'    + #bne loop1
  'C6 59'    + #dec $59
  'A5 59'    + #lda $59
  'C9 FF'    + #cmp #$FF
- 'D0 D3'    + #bne
- 'A9 80'    + #lda #$80  #disable cartridge ROM
+ 'D0 D3'    + #bne loop1
+ 'A9 80'    + #lda #$80  ;bit7 set to 1 to disable cartridge ROM
  '8D 00 DE' + #sta $DE00
  '58'       + #cli
- '6C FC FF' + #jmp ($fffc) #reset
+ '6C FC FF' + #jmp ($fffc) ;kernal soft reset
  '00 00 00 00' #filler
 )
 
@@ -151,36 +145,42 @@ content.append(int(size / 0x100))
 # add program, with start address
 content += prg
 
-# align to 0x2000 bytes
-while (len(content) & 0x1fff) != 0:
+romImageSize = 0x2000  #typically $2000 (8K) or $4000 (16K)
+packetSize = romImageSize + 0x10
+
+# align to romImageSize bytes
+while (len(content) & (romImageSize-1)) != 0:
 	content.append(0)
 
-
-# save content as 8K Chip blocks
-banks = int(len(content) / 0x2000)
+# save content in blocks of romImageSize
+banks = int(len(content) / romImageSize)
 for bank in range(0, banks):
-	#          C  H  I  P
-	writeHex('43 48 49 50')
+	crtData += bytearray(b'CHIP')
 	
-	# total packet length: 0x2010 (ROM image size + CHIP header)
-	writeHex('00 00 20 10')
+	# total packet size (32 bits in big-endian format)
+	# this is the ROM image size + CHIP header size ($10)
+	crtData.append(int(packetSize / 0x100000000))
+	crtData.append(int(packetSize / 0x10000))
+	crtData.append(int(packetSize / 0x100))
+	crtData.append(packetSize & 0xff)
 	
-	# chip type: 0=ROM, 1=RAM only, 2=Flash ROM
-	writeHex('00 00')
+	# chip type (16-bit value)
+	writeHex('00 00') # 0=ROM, 1=RAM only, 2=Flash ROM, 3=EEPROM
 	
-	# bank number
-	crtData.append(0)
-	crtData.append(bank)
+	# bank number (16-bit value)
+	crtData.append(0)     # hibyte always zero
+	crtData.append(bank)  # lobyte
 	
-	# starting load address $8000
+	# starting load address $8000 (big-endian format)
 	writeHex('80 00')
 	
-	# ROM image size 8K = $2000
-	writeHex('20 00')
-	
-	# 0x2000 bytes ROM image
-	start = 0x2000 * bank
-	end = start + 0x2000
+	# ROM image size (big-endian format)
+	crtData.append(int(romImageSize / 0x100)) #hibyte
+	crtData.append(romImageSize & 0xff) #lobyte
+
+	# append bytes to ROM image
+	start = romImageSize * bank
+	end = start + romImageSize
 	crtData += content[start:end]
 
 # save module
