@@ -119,6 +119,12 @@ TOOL_REMAP = 1
 .ifdef TOOL_COPY
 TOOL_REMAP = 1
 .endif
+.ifdef TOOL_MOVE
+TOOL_RELOC = 1
+.endif
+.ifdef TOOL_RENUM
+TOOL_RELOC = 1
+.endif
 
 *=$c000
 
@@ -577,6 +583,8 @@ do_renum
  jsr relink
  jsr hdr_renum        ;renumber the line headers (size-neutral)
  jsr relink
+ jsr reloc_block      ;a partial renumber may now belong elsewhere
+ jsr relink
  jsr finishop
  lda #0
  sta resultcode       ;OK
@@ -584,12 +592,12 @@ dr_x
  rts
 
 ;val_renum: pre-flight. Sets resultcode (0 ok / 2 range / 3 collision / 4 none).
+;A partial renumber may relocate its source block; only a resulting number
+;already owned by a non-source line is a collision.
 val_renum
  lda #0
  sta scount
  sta scount+1
- sta haveb
- sta havea
  jsr set_rrange       ;rlo=lo16, rhi=end16
  jsr lp_first
 vr_lp
@@ -597,30 +605,7 @@ vr_lp
  beq vr_end
  jsr in_range
  bcs vr_src
- ;kept line: below the block (curnum<lo16) or above it
- lda lo16
- sta rlo
- lda lo16+1
- sta rlo+1
- jsr cmp_cur_rlo      ;C=curnum>=lo16
- bcs vr_above
- lda curnum           ;below -> remember the largest kept line under the block
- sta beforeN
- lda curnum+1
- sta beforeN+1
- lda #1
- sta haveb
- jmp vr_next
-vr_above
- lda havea
- bne vr_next          ;keep only the FIRST kept line above the block
- lda curnum
- sta afterN
- lda curnum+1
- sta afterN+1
- lda #1
- sta havea
- jmp vr_next
+ bcc vr_next
 vr_src
  inc scount
  bne vr_next
@@ -638,8 +623,10 @@ vr_end
 vr_have
  ;lastnew = base + inc*(scount-1); reject if any value > 63999
  lda base16
+ sta newmin
  sta lastnew
  lda base16+1
+ sta newmin+1
  sta lastnew+1
  lda base16+1
  cmp #$fa
@@ -681,34 +668,24 @@ vr_m_ok
  sta cnt+1
  jmp vr_mul
 vr_order
- lda haveb
- beq vr_ck_after
- ;base must be > beforeN
- lda base16
- sta curnum
- lda base16+1
- sta curnum+1
- lda beforeN
- sta rlo
- lda beforeN+1
- sta rlo+1
- jsr cmp_cur_rlo      ;C=base>=beforeN, Z=equal
- bcc vr_coll
- beq vr_coll
-vr_ck_after
- lda havea
- beq vr_ok
- ;lastnew must be < afterN
  lda lastnew
- sta curnum
+ sta newmax
  lda lastnew+1
- sta curnum+1
- lda afterN
- sta rlo
- lda afterN+1
- sta rlo+1
- jsr cmp_cur_rlo      ;C=lastnew>=afterN
+ sta newmax+1
+ ;collision: any non-source line in the resulting number range?
+ jsr lp_first
+vr_clp
+ jsr lp_num
+ beq vr_ok
+ jsr set_rrange
+ jsr in_range
+ bcs vr_cnext         ;source line is being replaced, so cannot collide
+ jsr set_nrange
+ jsr in_range
  bcs vr_coll
+vr_cnext
+ jsr lp_next
+ jmp vr_clp
 vr_ok
  lda #0
  sta resultcode
@@ -773,7 +750,7 @@ dm_ok1
  jsr refpass
  jsr relink
  jsr hdr_move
- jsr mv_reloc
+ jsr reloc_block
  jsr relink
  jsr finishop
  lda #0
@@ -909,10 +886,13 @@ hm_next
  jmp hm_lp
 hm_x
  rts
+.endif
 
-;mv_reloc: relocate the moved block to sorted position by swapping it with the
-;adjacent run of kept lines it must leapfrog (3-reversal block swap, in place).
-mv_reloc
+;reloc_block: relocate a renumbered/moved block to sorted position by swapping
+;it with the adjacent run of kept lines it must leapfrog (3-reversal block swap,
+;in place). newmin/newmax identify the collision-free block.
+.ifdef TOOL_RELOC
+reloc_block
  jsr set_nrange       ;rlo=newmin, rhi=newmax (block's new numbers)
  jsr lp_first
 mr_f0

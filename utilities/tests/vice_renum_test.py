@@ -443,6 +443,52 @@ def session_dest_anchor(crt, dorenum, domenu, next_port):
     return results
 
 
+def session_partial_relocate(crt, dorenum, domenu, next_port):
+    """A partial R may move its renumbered block into an earlier gap.
+
+    This is the practical regression case: with normally spaced lines, R
+    1 230 240 65 must put the old 230/240 at 65/66 between retained 60 and
+    70, rather than rejecting 65 merely because it is below source line 230.
+    The GOTO also proves references and execution still work after relocation.
+    """
+    results = {}
+    port = next_port()
+    prog = ["10 GOTO 230", '60 PRINT"SIXTY"', '70 PRINT"SEVENTY"',
+            '220 PRINT"TWO20"', '230 PRINT"SUB":GOTO 250',
+            '240 PRINT"OLD240"', '250 PRINT"DONE":END']
+    proc = lib.boot(port, crt)
+    try:
+        s = harness.connect_monitor(port, 20.0); time.sleep(6.0); s.close()
+        lib.type_lines(port, prog)
+        lib.open_tool(port, dorenum)
+        lib.cmd(port, "1 230 240 65")
+        s = harness.connect_monitor(port, 20.0)
+        results["partial_relocate_ok"] = "OK" in harness.screen_text(s).upper()
+        results["partial_relocate_links"] = (
+            lib.walk_links(s) == [10, 60, 65, 66, 70, 220, 250]
+        )
+        s.close()
+        harness.keyboard_type_on_port(port, "\x03")
+        time.sleep(0.6)
+        harness.keyboard_type_on_port(port, "\x93LIST\r")
+        time.sleep(1.2)
+        s = harness.connect_monitor(port, 20.0)
+        lst = harness.screen_text(s).upper()
+        s.close()
+        results["partial_relocate_listing"] = ("10 GOTO 65" in lst and "60 PRINT" in lst
+                                                and "65 PRINT" in lst and "66 PRINT" in lst
+                                                and "70 PRINT" in lst)
+        harness.keyboard_type_on_port(port, "RUN\r")
+        time.sleep(1.2)
+        s = harness.connect_monitor(port, 20.0)
+        run = harness.screen_text(s).upper()
+        s.close()
+        results["partial_relocate_runs"] = "SUB" in run and "DONE" in run
+    finally:
+        lib.finish_on_port(proc, port)
+    return results
+
+
 def session_copy_basic(crt, dorenum, domenu, next_port):
     """copy success + internal reference retarget + reject identity.
     10 GOSUB 100 / 20 END / 100 PRINT"SUB" / 110 GOTO 100 / 120 RETURN
@@ -540,6 +586,7 @@ TESTS = [
     ("screen_backup", session_screen_backup),
     ("cursor", session_cursor),
     ("dest_anchor", session_dest_anchor),
+    ("partial_relocate", session_partial_relocate),
     ("copy_basic", session_copy_basic),
     ("convert_basic", session_convert_basic),
 ]
