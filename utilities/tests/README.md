@@ -51,6 +51,32 @@ cartridge (image + docs + tool banks) into `/tmp` for the suite to boot.
   equality, and the full post-BREAK LIST/edit/SAVE/RUN development loop.
 - **`vice_pack_examples.py`** — package the example-program sample into a
   temporary D81 with the real in-emulator tool and verify each.
+- **`vice_scroll_timing_test.py`** — uses a VICE `$D016` write watchpoint and
+  CPU-history clocks to reproduce the original fine-scroll hitch, then verifies
+  `hscroll_smooth.bas` keeps every horizontal position within three quarters of
+  a frame of its four-frame budget on PAL and NTSC. The sample prepares a second screen at
+  `$2000` and swaps it at the coarse-scroll boundary, so no partially shifted
+  row is displayed (warp mode does not affect the emulated timing).
+- **`vice_scroll_step_test.py`** — runs `hscroll_step.bas` on PAL and NTSC,
+  changes its live pixel displacement from 1 to 5 and then 8 through the C64
+  keyboard buffer, and verifies both the fine-scroll sequence and page swaps.
+- **`vice_scroll_2d_test.py`** — verifies the pure-MDBASIC `scroll_2d.bas` uses
+  one `SCREEN` command to update `$D011` and `$D016` on PAL and NTSC, including
+  live step changes from 1 to 3 and 7, and checks that its checkerboard is
+  invariant across diagonal coarse wraps.
+- **`block_scroll.bas`** — a pure-MDBASIC coarse character scroller with several
+  randomly sized 1-8 by 1-8 white reverse-space blocks. Blocks enter and leave one column at a
+  time, and horizontal spawn spacing prevents overlap. A custom stipple character
+  uses multicolor character mode to supply a dark, bitmap-like tiled background
+  while the reverse spaces remain solid white, retaining text `SCROLL`;
+  redefining screen code 32 makes the spaces inserted by non-wrapping `SCROLL`
+  display the proper tile, while `FILL` draws the new block edge and explicitly
+  restores its trailing edge. Degenerate one-column moves use `FILL` because the
+  cartridge's left-scroll copy loop requires a region at least two columns wide.
+- **`vice_block_scroll_test.py`** — single-steps that example in VICE and checks
+  every frame for white solid rectangles, legal dimensions, left-only movement,
+  right-edge-only entry, gradual left-edge exit, background restoration, and
+  at least two blank columns between simultaneous blocks.
 
 ## Sprite MOVE timing
 
