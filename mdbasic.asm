@@ -5160,6 +5160,7 @@ addfb
  bcc fbadd
  inc $fc
 fbadd
+ clv        ;copy loop branches on overflow so carry remains intact
  rts
 ;
 ;*******************
@@ -8551,22 +8552,23 @@ pokee
  sta $fc
  stx LINNUM+1
 poker
+ clc
  lda $fe        ;single byte poke value
  ldx $fd        ;poke type 0=set,1=and,2=or,3=eor,4=rasterand
  beq poke0
  dex
  bne poke2
  and ($fb),y
- jmp poke0
+ bcc poke0
 poke2 dex
  bne poke3
  ora ($fb),y
- jmp poke0
+ bcc poke0
 poke3
  dex
  bne poke4
  eor ($fb),y
- jmp poke0
+ bcc poke0
 poke4
  and $d012   ;raster line 8-bits
 poke0 sta ($fb),y
@@ -8586,17 +8588,18 @@ chkdone
  lda LINNUM
  cmp $fb
  bcs poker
-poked jmp memnorm
 ;operation 5, copy bytes from source to destination address
 cpypoke
+ sei
+ dec R6510
+ dec R6510      ;switch out Kernal ROM and I/O
+copybyte
  lda $fe
- sec            ;decrement num bytes to copy
- sbc #1
- sta $fe
- lda $ff
- sbc #0
- bcc poked
- sta $ff
+ bne declow
+ dec $ff
+ bmi copydone
+declow
+ dec $fe        ;decrement num bytes to copy
  lda ($fb),y    ;get source byte
  sta (LINNUM),y ;set destination byte
 ;advance source and destination pointers
@@ -8609,7 +8612,12 @@ cpypoke
 incsrc
  lda COUNT      ;step increment
  jsr addfb      ;advance source ptr
- jmp cpypoke    ;continue copying
+ bvc copybyte   ;continue copying
+copydone
+ inc R6510
+ inc R6510      ;restore I/O and Kernal before enabling IRQs
+ cli
+poked jmp memnorm
 ;
 ;--------------
 ;perform HEX$(s$) for 32-bit number
@@ -9436,7 +9444,5 @@ clrflg lda TXTPTR
  sty COUNT
  sty XSAV
  rts
-;
-.repeat 2,0 ;filler to complete RAM page
 ;
 .end
