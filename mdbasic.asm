@@ -201,6 +201,7 @@ IEVAL  = $030a ;Evaluates a Single-Term Arithmetic Expression
 SAREG  = $030c ;Storage Area for processor registers A,X,Y,P for SYS
 CINV   = $0314 ;IRQ Interrupt Routine
 CBINV  = $0316 ;BRK Instruction Interrupt
+NMIVEC = $0318 ;Kernal NMI dispatch vector
 ILOAD  = $0330 ;Kernal LOAD Routine
 ISAVE  = $0332 ;Kernal SAVE Routine
 ISTOP  = $0328 ;Vector to Kernal STOP Routine
@@ -569,7 +570,7 @@ cmdtab
 .rta line    ;$e2
 .rta paint   ;$e3
 .rta draw    ;$e4
-.rta renum   ;$e5
+.rta baderr2 ;$e5 reserved token slot; RENUM removed
 .rta text    ;$e6
 .rta screen  ;$e7
 .rta resume  ;$e8
@@ -2236,67 +2237,6 @@ raiseerr
 ;
 
 baderr2 jmp FCERR   ;ILLEGAL QUANTITY
-;
-;*******************
-; RENUM            :use defaults, start at 10 inc by 10
-; RENUM start      :start line specified, default inc 10
-; RENUM start, inc :use both start and inc specified
-renum
- bne renumst  ;param1 specified
- lda #10      ;no params, set default
- sta FRESPC   ;start at line 10, inc by 10
- sta FREETOP
- lda #0
- sta FRESPC+1
- beq hiinc    ;always branches
-renumst
- jsr LINGET   ;get start line number
- lda LINNUM
- sta FRESPC
- lda LINNUM+1
- sta FRESPC+1
- jsr comchk
- beq renuminc ;increment specified
- lda FRESPC
- sta FREETOP
- lda FRESPC+1
- jmp hiinc
-renuminc
- jsr CHRGET
- jsr LINGET   ;get line increment
- lda LINNUM
- sta FREETOP
- ora LINNUM+1
- beq baderr2  ;increment of 0 not allowed
-okinc lda LINNUM+1
-hiinc
- sta FREETOP+1
- jsr RUNC
- dec R6510
- jsr renumer
- inc R6510
-;end of renum; list any go tokens with 65535 as line number (errors)
- jsr old2
- jsr find ;find all 65535
- jmp endprg
-;
-;these 2 routines are only called when BASIC ROM is switched out
-fltstr
- inc R6510    ;switch BASIC ROM in
- jsr uint2fl  ;convert 2-byte unsigned int in FAC1 to float
- jsr FOUT+2   ;convert FAC1 to string without leading space
- dec R6510    ;switch BASIC ROM out
- rts          ;return to caller under BASIC ROM
-;
-tofac
- lda FRESPC
- sta $63
- lda FRESPC+1
- sta $62
- inc R6510    ;switch BASIC ROM in
- jsr RUNC     ;reset TXTPTR to beginning of program
- dec R6510    ;switch BASIC ROM out
- rts
 ;
 ;*******************
 ; SWAP A, B    SWAP A%, B%    SWAP A$, B$
@@ -5153,6 +5093,9 @@ times8
 end40 rts
 ;
 ;add 8 bit value in accumulator to value in $fb,$fc
+nmi_rti
+ rti
+;
 addfb
  clc
  adc $fb
@@ -5160,6 +5103,7 @@ addfb
  bcc fbadd
  inc $fc
 fbadd
+ clv        ;copy loop branches on overflow so carry remains intact
  rts
 ;
 ;*******************
@@ -5638,14 +5582,8 @@ ascctlfn
 ;scroll direction vectors up,down,left,right
 scrolls .rta scroll0,scroll1,scroll2,scroll3
 
-;8 tokens use line numbers that need to be renumbered when using renum
-gotok
-.byte TOKEN_GOTO, TOKEN_GOSUB, TOKEN_RETURN, TOKEN_THEN
-.byte TOKEN_ELSE, TOKEN_RESUME, TOKEN_RUN, TOKEN_RESTORE
-
 ;strings
 addchr .shift "+chr$("  ;used by keylist to display non-printable chars
-nolin  .null "65535"    ;used by renum to find bad GO statements
 
 ;build expression to convert time$ to time in seconds since midnight
 ;expression to calc seconds since midnight
@@ -8551,22 +8489,23 @@ pokee
  sta $fc
  stx LINNUM+1
 poker
+ clc
  lda $fe        ;single byte poke value
  ldx $fd        ;poke type 0=set,1=and,2=or,3=eor,4=rasterand
  beq poke0
  dex
  bne poke2
  and ($fb),y
- jmp poke0
+ bcc poke0
 poke2 dex
  bne poke3
  ora ($fb),y
- jmp poke0
+ bcc poke0
 poke3
  dex
  bne poke4
  eor ($fb),y
- jmp poke0
+ bcc poke0
 poke4
  and $d012   ;raster line 8-bits
 poke0 sta ($fb),y
@@ -8586,17 +8525,26 @@ chkdone
  lda LINNUM
  cmp $fb
  bcs poker
-poked jmp memnorm
 ;operation 5, copy bytes from source to destination address
 cpypoke
+ sei
+ lda NMIVEC
+ pha
+ lda NMIVEC+1
+ pha
+ lda #<nmi_rti
+ sta NMIVEC
+ lda #>nmi_rti
+ sta NMIVEC+1
+ dec R6510
+ dec R6510      ;switch out Kernal ROM and I/O
+copybyte
  lda $fe
- sec            ;decrement num bytes to copy
- sbc #1
- sta $fe
- lda $ff
- sbc #0
- bcc poked
- sta $ff
+ bne declow
+ dec $ff
+ bmi copydone
+declow
+ dec $fe        ;decrement num bytes to copy
  lda ($fb),y    ;get source byte
  sta (LINNUM),y ;set destination byte
 ;advance source and destination pointers
@@ -8609,7 +8557,16 @@ cpypoke
 incsrc
  lda COUNT      ;step increment
  jsr addfb      ;advance source ptr
- jmp cpypoke    ;continue copying
+ bvc copybyte   ;continue copying
+copydone
+ inc R6510
+ inc R6510      ;restore I/O and Kernal before enabling IRQs
+ pla
+ sta NMIVEC+1
+ pla
+ sta NMIVEC
+ cli
+poked jmp memnorm
 ;
 ;--------------
 ;perform HEX$(s$) for 32-bit number
@@ -9244,199 +9201,7 @@ membank
  rts
 
 ;*********
-;prepare for FIND with 65535 as param
-f65535
- lda #>BUF
- sta TXTPTR+1
- lda #<BUF
- sta TXTPTR
- ldy #$05
-ffff lda nolin,y
- sta BUF,y
- dey
- bpl ffff
- rts
-;
-renumer
- jsr getchr
- jsr getchr
- bne serch
- jsr tofac
-strnum
- jsr getchr
- jsr getchr
- beq f65535  ;end of renum process
- jsr getchr
- lda $63
- sta (TXTPTR),y
- jsr getchr
- lda $62
- sta (TXTPTR),y
- jsr addinc
- beq strnum
-serch
- lda #"."
- jsr CHROUT
- jsr getchr
- jsr getchr
-nocrap jsr getchr
-craper cmp #"""
- bne tokgo
-;skip over expression in quotes
-crap jsr getchr
- beq renumer   ;no end-quote, end of line
- cmp #"""
- bne crap
- beq nocrap
-tokgo tax
- beq renumer
- bpl nocrap
-;check if token is a statement that use line numbers
- ldx #7        ;there are 8 tokens that reference a line number
-chktok
- cmp gotok,x   ;8 tokens indexed 0 to 7
- beq sav7a
- dex
- bpl chktok
-fndtok
- cmp #TOKEN_ERR
- bne nocrap
-;determine if error line comparison, ie: IF ERRL=100 THEN...
- jsr getchr
- cmp #"l"       ;ERRL
- bne craper
- jsr CHRGET
- cmp #TOKEN_EQUAL ;ERRL=
- bne craper
-sav7a
- lda TXTPTR
- sta OLDLIN
- lda TXTPTR+1
- sta OLDLIN+1
- jsr CHRGET
- bcs craper
- jsr rom3      ;evaluate line number
- jsr replac
- lda OLDLIN+1
- sta TXTPTR+1
- lda OLDLIN
- sta TXTPTR
-;apply new line number
- ldy #$00
- ldx #$00
-numchr lda BAD,x
- cmp #"0"
- bcc less0
- pha
- jsr CHRGET
- bcc skp2d
- jsr inc2d
-skp2d pla
- ldy #$00
- sta (TXTPTR),y
- inx
- bne numchr
-less0 jsr CHRGET
- bcs workdone
-dec2d jsr clrflg
- dec XSAV
-work ldy COUNT
- iny
- lda ($22),y
- ldy XSAV
- iny
- sta ($22),y
- jsr pntreq
- beq crush1
- inc $22
- bne work
- inc $23
- bne work
- jsr bufer
-crush1
- lda VARTAB
- bne ne2d
- dec VARTAB+1
-ne2d dec VARTAB
- jsr CHRGOT
- bcc dec2d
-workdone
- cmp #","   ;comma-separated list of line numbers?
- beq sav7a
- jmp craper
-;
-replac jsr tofac
-goagan jsr getchr
- jsr getchr
- bne isline ;invalid line numer?
- lda #$ff   ;then use 65535
- sta $62
- sta $63
- jmp fltstr ;convert line number to string in FAC1
-isline
-;if found line number then convert to string in FAC1
- jsr getchr
- cmp LINNUM
- bne nexlin
- jsr getchr
- cmp LINNUM+1
- bne nexlin+3
- jmp fltstr
-;
-nexlin jsr getchr
- jsr addinc
- beq goagan
-inc2d jsr clrflg
- inc XSAV
- jsr bufer
- inc VARTAB
- bne gbwyc
- inc VARTAB+1
-gbwyc rts
-;
-pne2 lda $24
- bne ne24
- dec $25
-ne24 dec $24
-bufer ldy COUNT
- lda ($24),y
- ldy XSAV
- sta ($24),y
- jsr pntreq
- bne pne2
- rts
-;
-addinc lda $63
- clc
- adc FREETOP
- sta $63
- lda $62
- adc FREETOP+1
- sta $62
-necg jsr getchr
- bne necg
- rts
-;
-pntreq lda $22
- cmp $24
- bne gbhah
- lda $23
- cmp $25
-gbhah rts
-;
-clrflg lda TXTPTR
- sta $22
- lda TXTPTR+1
- sta $23
- lda VARTAB
- sta $24
- lda VARTAB+1
- sta $25
- ldy #$00
- sty COUNT
- sty XSAV
- rts
-;
-.repeat 2,0 ;filler to complete RAM page
+;the 16K image must still occupy $8000-$BFFF; this tail is reusable space
+.repeat 354,0
 ;
 .end
