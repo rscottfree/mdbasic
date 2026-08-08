@@ -47,14 +47,14 @@ u64_mem() {
 wait_results() {
     deadline=$(( $(date +%s) + 90 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        value=$(u64_mem C000 3)
+        value=$(u64_mem C080 11)
         case "$value" in
-            000000|"") ;;
-            *) echo "$value"; return 0 ;;
+            *ff) echo "$value"; return 0 ;;
+            *) ;;
         esac
         sleep 1
     done
-    echo "ERROR: timed out waiting for result bytes at \$C000" >&2
+    echo "ERROR: timed out waiting for timing results at \$C080" >&2
     return 1
 }
 
@@ -66,7 +66,7 @@ run_case() {
     "$U64" signal machine -t reset -s >/dev/null
     sleep 5
     "$U64" update memory -a D030 -b "$turbo" -s >/dev/null
-    "$U64" update memory -a C000 -b 000000 -s >/dev/null
+    "$U64" update memory -a C080 -b 0000000000000000000000 -s >/dev/null
 
     u64_type 'LOAD"MDBASIC",8,1\n'
     sleep 5
@@ -78,14 +78,18 @@ run_case() {
 
     result=$(wait_results)
     echo "result=$result"
-    case "$result" in
-        000c16|010c16|020c16|000b16|010b16|020b16|000c15|010c15|020c15|000d16|010d16|020d16|000c17|010c17|020c17)
-            ;;
-        *)
-            echo "ERROR: unexpected $label result bytes: $result" >&2
-            return 1
-            ;;
-    esac
+    python3 - "$label" "$result" <<'PY'
+import sys
+
+label, raw = sys.argv[1], bytes.fromhex(sys.argv[2])
+if len(raw) != 11 or raw[-1] != 0xff:
+    raise SystemExit(f"ERROR: unexpected {label} result bytes: {raw.hex()}")
+got = [raw[i] | raw[i + 1] << 8 for i in range(0, 10, 2)]
+want = [5, 86, 173, 259, 344]
+if any(abs(a - b) > 2 for a, b in zip(got, want)):
+    raise SystemExit(f"ERROR: {label} timings {got}, expected about {want}")
+print(f"timings={got}")
+PY
 }
 
 cd "$ROOT"

@@ -215,6 +215,22 @@ TMPERR = $0336 ;original error handling vector
 TMPERRP= $0338 ;TXTPTR of statement for ON ERR GOTO line#
 TMPKEYP= $033a ;TXTPTR of statement for ON KEY GOSUB line#
 
+;IRQ MOVE state is reserved in otherwise-unused CPU RAM at $c000-$c061.
+;The utility menu may use this area while it is running, so active moves must
+;not be expected to survive a CTRL+RESTORE utility session.
+moveopt  = $c000
+movex    = $c001
+movexh   = $c009
+movey    = $c011
+movedx   = $c019
+movedxh  = $c021
+movedy   = $c029
+moveerr  = $c031
+moveerrh = $c039
+moveacc  = $c051
+movespd  = $c059
+movee2lo = $c061
+
 ;CBM command line functions
 CHRGET = $0073 ;Get Next BASIC Text Character
 CHRGOT = $0079 ;Get Current BASIC Text Character
@@ -2694,6 +2710,7 @@ nogo
 ; MOVE sprite#, [x1] [,y1]
 ; MOVE sprite#, [x1], y1 TO x2, y2, speed
 ; MOVE sprite# TO x2, y2, [speed]
+; A TO form queues a non-blocking line move; the sprite IRQ advances it.
 move
  jsr sprnum    ;get sprite# and 2^sprite# ($bf)
  tya           ;sprite number 0-7
@@ -2745,6 +2762,10 @@ gety
  jsr CHRGOT
  cmp #TOKEN_TO
  beq moveto    ;TO token not present so we are done
+ lda $bf       ;a direct position update cancels any queued move
+ eor #$ff
+ and moveopt
+ sta moveopt
  rts
 badxy jmp hellno
 moveto
@@ -2764,10 +2785,8 @@ moveto
  bne nosped    ;no move speed specified?
  jsr getvalg   ;get the speed param 0-255
  sta $fe       ;temp storage for move speed
-nosped ldx #0
- stx $22       ;init speed accumulator
- inx           ;0=draw line, 1=move sprite
- jmp strtln    ;calculate line and move sprite along that line at given speed
+nosped ldx #1  ;sprite mode (the old blocking line drawer is no longer used)
+ jmp moveinit  ;queue the line; sprite IRQ advances it at the requested speed
 ;
 spriteon
  dey            ;0 dec to 255 for all sprites
@@ -4953,6 +4972,7 @@ irq1
  lsr
  bcc irq2
  pha
+ jsr sprmove
  jsr sprani
  pla
 irq2
@@ -4979,7 +4999,7 @@ mdbirqoff
 ;*****************************************
 keypump
  ldx NDX        ;if keyboard buffer is empty then put next char
- bne irqdone2   ;otherwise forward to original IRQ vector
+ bne keypumpdone ;otherwise forward to original IRQ vector
  lda R6510
  pha
  and #%11111110
@@ -4997,19 +5017,75 @@ nostrflg
  sta KEYD       ;place char in keyboard buffer
  inc NDX        ;indicate 1 char waiting in buffer
  inc keyidx     ;advance index to next char
- bne irqdone2   ;continue original IRQ vector
+ bne keypumpdone ;continue original IRQ vector
+keypumpdone
+ jmp irqdone2
 alldone
  lda #0
  sta keystrflg
  lda #%11111011 ;key pump irq flag off
  jmp irqoff
 ;
-;****************************
-;Sprite animation IRQ routine
-;****************************
+;*********************************
+;Sprite animation / MOVE IRQ code
+;*********************************
+;IRQ-driven sprite line movement
+;MOVE stores one Bresenham line per sprite. The state is separate from the
+;graphics line drawer because an IRQ may arrive while LINE/PLOT is active.
+sprmove
+ dec R6510
+ jsr sprmovecore
+ inc R6510
+ rts
+
+;Queue the MOVE parameters held by the command parser.
+moveinit
+ sei            ;publish the per-sprite state atomically to the IRQ
+ lda GARBFL
+ lsr
+ tax
+ lda $50
+ sta movex,x
+ lda $51
+ sta movexh,x
+ lda $52
+ sta movey,x
+;absolute horizontal distance and direction
+ lda $50
+ sec
+ sbc $fb
+ sta movedx,x
+ lda $51
+ sbc $fc
+ sta movedxh,x
+ bcs movexpos
+ lda movedx,x
+ eor #$ff
+ clc
+ adc #1
+ sta movedx,x
+ lda movedxh,x
+ eor #$ff
+ adc #0
+ sta movedxh,x
+ lda movexh,x
+ ora #2
+ sta movexh,x
+movexpos
+ dec R6510
+ jsr moveinit_tail
+ inc R6510
+ cli
+ rts
+
+
 sprani
  lda aniopt
- beq anioff     ;all flags off so turn off irq
+ bne anion
+ lda moveopt
+ bne irqdone2
+ beq anioff     ;all sprite IRQ flags off so turn off irq
+anion
  ldx #7         ;prepare to process all 7 bits
 chkani asl      ;bit7 to carry
  bcc nxtani     ;not set then next bit
@@ -5422,7 +5498,6 @@ mapcolbits .byte 8      ;(8,16,24) used for plotting a dot on a multicol bitmap
 playtime   .byte 0      ;current jiffies till next note
 playvoice  .byte 0      ;SID register offset for play voice
 playwave   .byte 0      ;waveform for play notes
-
 
 ;********************************************************************
 ;* ROM barrier at A000-BFFF switch to RAM using R6510 before entry  *
@@ -5911,40 +5986,9 @@ b7no6e lda $59
 jmpout1 sta $fd ;y coordinate
 jmpout jmp starts
 linedone
- ldy XSAV       ;sprites can have a y coord to 255
- bne jmpout1    ;moving a sprite so continue
  rts
 pokadd
- lda XSAV       ;flag 0=draw line, else move sprite
- beq setdot
-;hack to move a sprite instead of plot line
- lda $bf        ;temp var of sprite's bit#
- ldy $fc        ;temp var hibyte of x coord
- beq nod010     ;x is less than 256
- ora MSIGX      ;MSB of sprites 0-7 x coordinate
- bne std010     ;always branches
-nod010
- eor #$ff
- and MSIGX
-std010 sta MSIGX
- lda $fb
- ldy GARBFL     ;temp var of sprite reg index
- sta SP0X,y
- lda $fd
- sta SP0Y,y
-;apply sprite move delay
- lda $fe        ;sprite move speed
- clc
- adc $22        ;accumulate speed for velocity control
- sta $22        ;to determine if a jiffy wait is needed
- bcc linedon    ;when speed accumulation overflows
- ldx #1         ;wait one jiffy
- ldy #0
- jsr delay2     ;jiffy wait; returns with carry set if STOP key pressed
- bcc linedon    ;STOP key not pressed so continue moving the sprite
- pla            ;STOP key pressed so prevent returning back to the move loop
- pla
-linedon rts
+ jmp setdot
 ;
 ;**************************
 setdot
@@ -9200,8 +9244,212 @@ membank
  ldy #0
  rts
 
+;The line-move worker lives in the free tail of the 16K image.  sprmove
+;switches BASIC ROM out before entering here; all MOVE state is in $c000 RAM.
+moveinit_tail
+;absolute vertical distance and direction
+ lda $52
+ sec
+ sbc $fd
+ sta movedy,x
+ bcs moveypos
+ eor #$ff
+ clc
+ adc #1
+ sta movedy,x
+ lda movexh,x
+ ora #4
+ sta movexh,x
+moveypos
+;bit 2 selects a y-major line; otherwise x is the major axis
+ lda movedxh,x
+ bne movexmajor
+ lda movedx,x
+ cmp movedy,x
+ bcs movexmajor
+ lda movexh,x
+ ora #8
+ sta movexh,x
+movexmajor
+ lda #0
+ sta moveerr,x
+ sta moveerrh,x
+;Keep the original 8-bit delay parameter and accumulator. The IRQ worker
+;groups every set of points up to an accumulator carry into one jiffy.
+ lda $fe
+ sta movespd,x
+ lda #0
+ sta moveacc,x
+ lda $bf
+ ora moveopt
+ sta moveopt
+ lda #%00000010
+ jmp irqon
+
+sprmovecore
+ lda moveopt
+ beq moveirqdone
+ ldx #7
+chkmove
+ asl
+ bcc moveloopnext
+ pha
+ lda movespd,x
+ cmp #4         ;cap very fast moves so one IRQ cannot monopolize the CPU
+ bcs moveslow
+ lda #96        ;fast batch: 344 pixels completes in about five jiffies
+ sta moveacc,x
+movebatch
+ jsr movestep
+ dec moveacc,x
+ bne movebatch
+ beq movebatchdone
+moveslow
+ lda moveacc,x
+movespeedloop
+ clc
+ adc movespd,x  ;same carry cadence as the original blocking MOVE delay
+ sta moveacc,x
+ bcs movespeedlast
+ jsr movestep
+ lda moveacc,x
+ jmp movespeedloop
+movespeedlast
+ jsr movestep
+movebatchdone
+ pla
+moveloopnext
+ dex
+ bpl chkmove
+moveirqdone
+ rts
+
+;Advance one Bresenham point. The caller batches these points per IRQ.
+movestep
+ txa
+ asl
+ tay
+ lda movexh,x
+ and #1
+ sta movee2lo
+ lda SP0X,y
+ cmp movex,x
+ bne moveactive
+ lda MSIGX
+ and bitweights,x
+ beq movexhi0
+ lda #1
+movexhi0
+ cmp movee2lo
+ bne moveactive
+ lda SP0Y,y
+ cmp movey,x
+ bne moveactive
+ lda bitweights,x
+ eor #$ff
+ and moveopt
+ sta moveopt
+ rts
+moveactive
+ lda movexh,x
+ and #8
+ bne moveymajor
+ jsr movexstep
+ lda moveerr,x
+ clc
+ adc movedy,x
+ sta moveerr,x
+ lda moveerrh,x
+ adc #0
+ sta moveerrh,x
+ lda moveerrh,x
+ cmp movedxh,x
+ bcc movestepdone
+ bne moveystep
+ lda moveerr,x
+ cmp movedx,x
+ bcc movestepdone
+moveystep
+ lda moveerr,x
+ sec
+ sbc movedx,x
+ sta moveerr,x
+ lda moveerrh,x
+ sbc movedxh,x
+ sta moveerrh,x
+ jsr moveystep1
+ rts
+moveymajor
+ jsr moveystep1
+ lda moveerr,x
+ clc
+ adc movedx,x
+ sta moveerr,x
+ lda moveerrh,x
+ adc movedxh,x
+ sta moveerrh,x
+ lda moveerrh,x
+ bne movexstep1
+ lda moveerr,x
+ cmp movedy,x
+ bcc movestepdone
+movexstep1
+ lda moveerr,x
+ sec
+ sbc movedy,x
+ sta moveerr,x
+ lda moveerrh,x
+ sbc #0
+ sta moveerrh,x
+ jsr movexstep
+movestepdone
+ rts
+
+;X is sprite number and Y is its VIC register offset.
+movexstep
+ lda movexh,x
+ and #2
+ beq movexplus
+ lda SP0X,y
+ bne movexdec
+ lda MSIGX
+ eor bitweights,x
+ sta MSIGX
+movexdec
+ lda SP0X,y
+ sec
+ sbc #1
+ sta SP0X,y
+ rts
+movexplus
+ lda SP0X,y
+ clc
+ adc #1
+ sta SP0X,y
+ bne movexdone
+ lda MSIGX
+ ora bitweights,x
+ sta MSIGX
+movexdone
+ rts
+moveystep1
+ lda movexh,x
+ and #4
+ beq moveyplus
+ lda SP0Y,y
+ sec
+ sbc #1
+ sta SP0Y,y
+ rts
+moveyplus
+ lda SP0Y,y
+ clc
+ adc #1
+ sta SP0Y,y
+ rts
+
 ;*********
 ;the 16K image must still occupy $8000-$BFFF; this tail is reusable space
-.repeat 354,0
+.repeat $c000-*,0
 ;
 .end

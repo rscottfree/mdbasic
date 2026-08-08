@@ -54,14 +54,19 @@ cartridge (image + docs + tool banks) into `/tmp` for the suite to boot.
 
 ## Sprite MOVE timing
 
-`sprite_timing.bas` measures sprite `MOVE ... TO ...` delays against the jiffy clock
-at `$A2`, writing result bytes to `$C000-$C002` (speed 0/1/2 deltas). Run it against
-Ultimate 64 hardware with:
+`sprite_timing.bas` reproduces the original `SS` test's 344-pixel move at speeds
+0/64/128/192/255. It installs a 30-byte waiter at `$C100` that watches the
+VIC-II X register and sprite-0 X-MSB with interrupts enabled, snapshots the
+24-bit jiffy clock at `$C070-$C072` when X reaches 344, and returns to BASIC.
+This timestamps a non-blocking MOVE without adding a BASIC polling loop's delay.
+The five 16-bit little-endian results are written to `$C080-$C089`, followed by
+the `$FF` completion marker at `$C08A`. Run it against Ultimate 64 hardware with:
 
 ```sh
 sh utilities/tests/u64_sprite_timing_test.sh
 ```
 
-Expected U64 result bytes are typically `010c16` or `020c16` (speed 1 ≈ 12 jiffies,
-speed 2 ≈ 22 jiffies); the same result under `$D030=$FF` turbo confirms the delay
-is jiffy-clock based. `move_timing_test.py` runs the corresponding check in VICE.
+Results should remain close to the original 5/86/173/259/344 jiffies. The same
+result under `$D030=$FF` turbo confirms that movement remains IRQ-driven rather
+than tied to BASIC execution speed. `move_timing_test.py` runs the corresponding
+check in VICE.

@@ -52,12 +52,12 @@ stated above. Any coordinate value that
 exceeds the legal range will cause an
 ILLEGAL COORDINATE ERROR.
 
-speed (0-255) controls the amount of
-delay in movement between coordinates
-when the sprite moves from between
-points with 0 being the fastest. The
-next BASIC statement will not execute
-until the movement is complete.
+speed (0-255) controls the movement
+rate between points, with 0 being the
+fastest. A `TO` move returns immediately;
+the sprite is advanced by the IRQ while
+the next BASIC statements execute. Up to
+eight sprites may move at the same time.
 
 EXAMPLE:
 ```text

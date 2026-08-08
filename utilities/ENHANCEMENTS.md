@@ -20,11 +20,12 @@ It costs **zero bytes** in the 16K runtime image — the manual is packed into e
 Magic Desk cartridge banks. The existing keys are preserved: **RUN/STOP+RESTORE**
 still breaks, and plain **RESTORE** keeps its editor-mode-reset/no-op behaviour.
 
-### Jiffy-clock sprite MOVE timing
+### IRQ-driven sprite MOVE
 
-`MOVE ... TO ...` sprite-movement delays are timed from the C64 jiffy clock
-instead of a CPU loop, so movement speed stays stable under Ultimate 64 turbo
-modes and other accelerated setups.
+`MOVE ... TO ...` returns immediately and advances up to eight sprites from the
+sprite IRQ. Its per-sprite delay accumulator preserves the original 0-255 timing
+curve while keeping movement independent of BASIC execution and Ultimate 64
+turbo modes.
 
 ## Building the enhanced artifacts
 
